@@ -1,0 +1,85 @@
+/** @typedef {'<1'|'1-2'|'3-5'|'5-10'|'10+'} DurationBucketId */
+
+export const DURATION_OPTIONS = [
+  { id: '<1', label: '<1 min', midpointMinutes: 0.5 },
+  { id: '1-2', label: '1–2 min', midpointMinutes: 1.5 },
+  { id: '3-5', label: '3–5 min', midpointMinutes: 4 },
+  { id: '5-10', label: '5–10 min', midpointMinutes: 7.5 },
+  { id: '10+', label: '10+ min', midpointMinutes: 12 },
+]
+
+export function midpointForBucket(bucketId) {
+  const row = DURATION_OPTIONS.find((o) => o.id === bucketId)
+  return row?.midpointMinutes ?? 0
+}
+
+function bumpCell(target, key, deltaMinutes) {
+  if (!key) return
+  const cell = target[key] ?? { sum: 0, count: 0 }
+  cell.sum += deltaMinutes
+  cell.count += 1
+  target[key] = cell
+}
+
+/**
+ * @param {object} durationStats
+ * @param {string} slotId
+ * @param {string} contentId
+ * @param {string} bucketId
+ */
+export function recordDurationObservation(durationStats, slotId, contentId, bucketId) {
+  const minutes = midpointForBucket(bucketId)
+  if (!minutes) return durationStats
+  const bySlot = { ...(durationStats.bySlot || {}) }
+  const byContent = { ...(durationStats.byContent || {}) }
+  bumpCell(bySlot, slotId, minutes)
+  bumpCell(byContent, contentId, minutes)
+  return { bySlot, byContent }
+}
+
+/**
+ * Apply Yes / No / Skip adjustments to learner scores.
+ * @param {object} scores — { timingScores, toneScores, contentScores, durationStats }
+ * @param {object} recommendation — output shape from promptOptimizer
+ * @param {'Yes'|'No'|'Skip'} response
+ * @param {string | null} durationBucket — when response is Yes and user answered follow-up
+ */
+export function applyFeedbackToScores(scores, recommendation, response, durationBucket) {
+  const timingScores = { ...scores.timingScores }
+  const toneScores = { ...scores.toneScores }
+  const contentScores = { ...scores.contentScores }
+  let durationStats = scores.durationStats
+    ? {
+        bySlot: { ...(scores.durationStats.bySlot || {}) },
+        byContent: { ...(scores.durationStats.byContent || {}) },
+      }
+    : { bySlot: {}, byContent: {} }
+
+  const slot = recommendation.timeSlotId
+  const tone = recommendation.tone
+  const content = recommendation.microActionId
+
+  if (response === 'Yes') {
+    timingScores[slot] = (timingScores[slot] ?? 0) + 0.35
+    toneScores[tone] = (toneScores[tone] ?? 0) + 0.45
+    contentScores[content] = (contentScores[content] ?? 0) + 0.45
+    if (durationBucket) {
+      durationStats = recordDurationObservation(
+        durationStats,
+        slot,
+        content,
+        durationBucket,
+      )
+    }
+  } else if (response === 'No') {
+    timingScores[slot] = (timingScores[slot] ?? 0) - 0.2
+    toneScores[tone] = (toneScores[tone] ?? 0) - 0.6
+    contentScores[content] = (contentScores[content] ?? 0) - 0.6
+  } else if (response === 'Skip') {
+    timingScores[slot] = (timingScores[slot] ?? 0) - 0.9
+    toneScores[tone] = (toneScores[tone] ?? 0) - 0.25
+    contentScores[content] = (contentScores[content] ?? 0) - 0.25
+  }
+
+  return { timingScores, toneScores, contentScores, durationStats }
+}

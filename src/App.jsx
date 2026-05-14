@@ -1,479 +1,298 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
-
-const STORAGE = {
-  userProfile: 'userProfile',
-  dailyContext: 'dailyContext',
-  timingScores: 'timingScores',
-  feedbackHistory: 'feedbackHistory',
-  lastRecommendation: 'lastRecommendation',
-}
-
-const TIME_WINDOWS = ['morning', 'afternoon', 'evening', 'after dinner']
-
-const BARRIERS = [
-  'lack of time',
-  'fatigue',
-  'pain',
-  'low motivation',
-  'weather',
-  'other',
-]
-
-const MICRO_ACTION_PROMPTS = [
-  'When this time window arrives, try two minutes of gentle indoor walking.',
-  'When this time window arrives, stand up and move lightly for two minutes.',
-  'When this time window arrives, try two minutes of gentle stretching.',
-  'When this time window arrives, take two minutes for slow breathing while seated comfortably.',
-  'When this time window arrives, do two minutes of easy shoulder rolls and neck movements.',
-]
-
-const SAFETY_NOTE_DEFAULT =
-  'Use comfortable effort only. You can shorten the activity or skip it if needed.'
-
-const SAFETY_NOTE_ACTIVE =
-  'Safety mode is on: keep effort very light, stay supported if needed, and stop if you notice increased discomfort.'
+import { TIME_SLOTS } from './data/timeSlots.js'
+import { TONES } from './data/promptTemplates.js'
+import { MICRO_ACTIONS, getMicroActionById } from './data/microActions.js'
+import { getCohortById } from './data/cohortProfiles.js'
+import { matchCohort, TIME_RANGE_OPTIONS } from './logic/coldStartEngine.js'
+import { optimizePrompt } from './logic/promptOptimizer.js'
+import { applyFeedbackToScores, DURATION_OPTIONS } from './logic/feedbackUpdater.js'
+import { computeAnalytics } from './logic/analytics.js'
+import {
+  loadAppState,
+  saveAppState,
+  resetDemoData,
+  TIME_RANGE_LABELS,
+  BARRIER_LABELS,
+  formatIdListForDisplay,
+  MAIN_BARRIER_IDS,
+} from './utils/storage.js'
 
 const DISCLAIMER =
-  'This prototype supports behavior change timing personalization and is not medical advice.'
+  'This prototype supports behavior change prompt optimization and is not medical advice.'
 
-function loadJson(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return fallback
-    return JSON.parse(raw)
-  } catch {
-    return fallback
-  }
+function toneLabel(tone) {
+  return tone.replace(/_/g, ' ')
 }
 
-function saveJson(key, value) {
-  localStorage.setItem(key, JSON.stringify(value))
-}
-
-function defaultUserProfile() {
-  return {
-    preferredTimeWindows: [],
-    mainBarrier: 'lack of time',
-    baselineConfidence: 'medium',
-    preferredPromptFrequency: 'once per day',
-    painConcern: 'no',
-  }
-}
-
-function defaultDailyContext() {
-  return {
-    fatigueToday: 3,
-    painToday: 0,
-    motivationToday: 3,
-    weather: 'not relevant',
-    availabilityToday: 'medium',
-  }
-}
-
-function defaultTimingScores() {
-  return {
-    morning: 0,
-    afternoon: 0,
-    evening: 0,
-    'after dinner': 0,
-  }
-}
-
-function promptForWindow(window) {
-  let h = 0
-  for (let i = 0; i < window.length; i++) h = (h + window.charCodeAt(i) * (i + 1)) % 997
-  return MICRO_ACTION_PROMPTS[h % MICRO_ACTION_PROMPTS.length]
-}
-
-function nextWindow(window) {
-  const i = TIME_WINDOWS.indexOf(window)
-  if (i < 0 || i >= TIME_WINDOWS.length - 1) return null
-  return TIME_WINDOWS[i + 1]
-}
-
-/** @param {Record<string, number>} scores */
-function bestWindowFromScores(scores) {
-  let best = TIME_WINDOWS[0]
-  let bestVal = scores[best] ?? -Infinity
-  for (const w of TIME_WINDOWS) {
-    const v = scores[w] ?? 0
-    if (v > bestVal) {
-      bestVal = v
-      best = w
-    }
-  }
-  return best
-}
-
-/** Prefer preferred windows on ties; otherwise earliest in the day order. */
-function pickBestAmongCandidates(scores, candidates, preferred) {
-  const pref = preferred instanceof Set ? preferred : new Set(preferred || [])
-  let bestVal = -Infinity
-  const tied = []
-  for (const w of candidates) {
-    const v = scores[w] ?? 0
-    if (v > bestVal) {
-      bestVal = v
-      tied.length = 0
-      tied.push(w)
-    } else if (v === bestVal) {
-      tied.push(w)
-    }
-  }
-  if (tied.length === 1) return tied[0]
-  const preferredTied = tied.filter((w) => pref.has(w))
-  const pool = preferredTied.length > 0 ? preferredTied : tied
-  return [...pool].sort((a, b) => TIME_WINDOWS.indexOf(a) - TIME_WINDOWS.indexOf(b))[0]
-}
-
-/**
- * Transparent scoring for recommendation.
- * @returns {{ scores: Record<string, number>, safetyMode: boolean, explanationParts: string[] }}
- */
-function computeRecommendationScores(userProfile, dailyContext, timingScores) {
-  const explanationParts = []
-  const painHigh = dailyContext.painToday >= 4
-  const fatigueHigh = dailyContext.fatigueToday >= 4
-  const preferred = new Set(userProfile.preferredTimeWindows || [])
-  const availabilityLow = dailyContext.availabilityToday === 'low'
-
-  const scores = {}
-  for (const w of TIME_WINDOWS) {
-    let s = 1
-    explanationParts.push(`${w}: base 1`)
-
-    if (preferred.has(w)) {
-      s += 1
-      explanationParts.push(`${w}: +1 (in your preferred time windows)`)
-    }
-
-    const feedbackScore = timingScores[w] ?? 0
-    if (feedbackScore !== 0) {
-      s += feedbackScore
-      explanationParts.push(
-        `${w}: ${feedbackScore >= 0 ? '+' : ''}${feedbackScore} (net from your past feedback in timing scores)`,
-      )
-    }
-
-    if (fatigueHigh && (w === 'morning' || w === 'afternoon')) {
-      s -= 0.5
-      explanationParts.push(`${w}: −0.5 (fatigue today is on the higher side)`)
-    }
-
-    scores[w] = s
-  }
-
-  if (painHigh) {
-    for (const w of TIME_WINDOWS) {
-      scores[w] -= 0.2
-      explanationParts.push(
-        `${w}: −0.2 (pain today is higher; scores are softened to reduce timing sharpness)`,
-      )
-    }
-    explanationParts.push(
-      'Safety mode: pain today is on the higher side, so wording is gentler and scores are slightly softened.',
-    )
-  }
-
-  let candidates = TIME_WINDOWS
-  if (availabilityLow && preferred.size > 0) {
-    candidates = TIME_WINDOWS.filter((w) => preferred.has(w))
-    explanationParts.push(
-      'Availability today is low, so only your preferred time windows were considered for the final pick.',
-    )
-  } else if (availabilityLow && preferred.size === 0) {
-    explanationParts.push(
-      'Availability today is low, but no preferred windows were saved, so all windows stayed in the running.',
-    )
-  }
-
-  const winner = pickBestAmongCandidates(scores, candidates, preferred)
-
-  if (painHigh && userProfile.preferredPromptFrequency === 'twice per day') {
-    explanationParts.push(
-      'Your saved frequency preference (twice per day) is noted; with higher pain today, the demo still shows one timing pick and keeps expectations light.',
-    )
-  }
-
-  if (userProfile.painConcern === 'yes') {
-    explanationParts.push(
-      'You indicated a pain concern in your profile; the safety note stays extra cautious even when the pain slider is lower.',
-    )
-  }
-
-  return {
-    scores,
-    safetyMode: painHigh,
-    explanationParts,
-    recommendedWindow: winner,
-  }
-}
-
-function formatScores(scores) {
-  return TIME_WINDOWS.map((w) => `${w}: ${(scores[w] ?? 0).toFixed(2)}`).join(' · ')
+function topSlotsByScore(timingScores, limit = 12) {
+  return [...TIME_SLOTS]
+    .map((s) => ({ ...s, score: timingScores[s.id] ?? 0 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
 }
 
 export default function App() {
-  const [userProfile, setUserProfile] = useState(defaultUserProfile)
-  const [dailyContext, setDailyContext] = useState(defaultDailyContext)
-  const [timingScores, setTimingScores] = useState(defaultTimingScores)
-  const [feedbackHistory, setFeedbackHistory] = useState([])
-  const [lastRecommendation, setLastRecommendation] = useState(null)
-  const [hydrated, setHydrated] = useState(false)
+  const [state, setState] = useState(loadAppState)
+  const [awaitingDuration, setAwaitingDuration] = useState(false)
 
   useEffect(() => {
-    setUserProfile(loadJson(STORAGE.userProfile, defaultUserProfile()))
-    setDailyContext(loadJson(STORAGE.dailyContext, defaultDailyContext()))
-    setTimingScores(loadJson(STORAGE.timingScores, defaultTimingScores()))
-    setFeedbackHistory(loadJson(STORAGE.feedbackHistory, []))
-    let lr = loadJson(STORAGE.lastRecommendation, null)
-    if (lr && lr.painFeedbackSticky === undefined && lr.safetyModeFromPainFeedback) {
-      lr = { ...lr, painFeedbackSticky: true }
-    }
-    setLastRecommendation(lr)
-    setHydrated(true)
+    saveAppState(state)
+  }, [state])
+
+  const analytics = useMemo(() => computeAnalytics(state), [state])
+
+  const updateProfile = useCallback((patch) => {
+    setState((s) => ({
+      ...s,
+      userProfile: { ...s.userProfile, ...patch },
+    }))
   }, [])
 
-  useEffect(() => {
-    if (!hydrated) return
-    saveJson(STORAGE.userProfile, userProfile)
-  }, [userProfile, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) return
-    saveJson(STORAGE.dailyContext, dailyContext)
-  }, [dailyContext, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) return
-    saveJson(STORAGE.timingScores, timingScores)
-  }, [timingScores, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) return
-    saveJson(STORAGE.feedbackHistory, feedbackHistory)
-  }, [feedbackHistory, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) return
-    if (lastRecommendation === null) {
-      localStorage.removeItem(STORAGE.lastRecommendation)
-    } else {
-      saveJson(STORAGE.lastRecommendation, lastRecommendation)
-    }
-  }, [lastRecommendation, hydrated])
-
-  const safetyModeActive = useMemo(() => {
-    const painTodayHigh = dailyContext.painToday >= 4
-    const sticky = lastRecommendation?.painFeedbackSticky === true
-    const painConcern = userProfile.painConcern === 'yes'
-    return painTodayHigh || sticky || painConcern
-  }, [dailyContext.painToday, lastRecommendation, userProfile.painConcern])
-
-  const updateProfileField = useCallback((field, value) => {
-    setUserProfile((p) => ({ ...p, [field]: value }))
-  }, [])
-
-  const togglePreferredWindow = useCallback((window) => {
-    setUserProfile((p) => {
-      const set = new Set(p.preferredTimeWindows || [])
-      if (set.has(window)) set.delete(window)
-      else set.add(window)
-      return { ...p, preferredTimeWindows: [...set] }
+  const toggleTimeRange = useCallback((id) => {
+    setState((s) => {
+      const cur = new Set(s.userProfile.preferredTimeRanges)
+      if (cur.has(id)) {
+        if (cur.size <= 1) return s
+        cur.delete(id)
+      } else {
+        cur.add(id)
+      }
+      return {
+        ...s,
+        userProfile: { ...s.userProfile, preferredTimeRanges: [...cur] },
+      }
     })
   }, [])
 
-  const updateDailyField = useCallback((field, value) => {
-    setDailyContext((c) => ({ ...c, [field]: value }))
+  const toggleBarrier = useCallback((id) => {
+    setState((s) => {
+      const cur = new Set(s.userProfile.mainBarriers)
+      if (cur.has(id)) {
+        if (cur.size <= 1) return s
+        cur.delete(id)
+      } else {
+        cur.add(id)
+      }
+      return {
+        ...s,
+        userProfile: { ...s.userProfile, mainBarriers: [...cur] },
+      }
+    })
+  }, [])
+
+  const updateDaily = useCallback((patch) => {
+    setState((s) => ({
+      ...s,
+      dailyContext: { ...s.dailyContext, ...patch },
+    }))
+  }, [])
+
+  const saveProfileAndMatch = useCallback(() => {
+    setState((s) => {
+      const m = matchCohort(s.userProfile)
+      return {
+        ...s,
+        matchedCohortId: m.cohortId,
+        cohortMatchScore: m.matchScore,
+      }
+    })
   }, [])
 
   const generateRecommendation = useCallback(() => {
-    setLastRecommendation((prev) => {
-      const sticky = prev?.painFeedbackSticky === true
-      const { scores, safetyMode, explanationParts, recommendedWindow } =
-        computeRecommendationScores(userProfile, dailyContext, timingScores)
-
-      const winner = recommendedWindow
-      const painConcern = userProfile.painConcern === 'yes'
-      const strongSafety = safetyMode || sticky || painConcern
-
-      const explanation = [
-        'How this time was chosen (transparent steps):',
-        ...explanationParts,
-        `Among eligible windows, "${winner}" had the highest combined score (ties favor a preferred window, then earlier in the day).`,
-      ].join('\n')
-
+    setState((s) => {
+      const cohortObj = s.matchedCohortId
+        ? getCohortById(s.matchedCohortId)
+        : matchCohort(s.userProfile).cohort
+      const rec = optimizePrompt({
+        userProfile: s.userProfile,
+        dailyContext: s.dailyContext,
+        matchedCohort: cohortObj,
+        timingScores: s.timingScores,
+        toneScores: s.toneScores,
+        contentScores: s.contentScores,
+        feedbackHistory: s.feedbackHistory,
+      })
+      const preferredTimeRangesText = formatIdListForDisplay(
+        s.userProfile.preferredTimeRanges,
+        TIME_RANGE_LABELS,
+      )
+      const mainBarriersText = formatIdListForDisplay(s.userProfile.mainBarriers, BARRIER_LABELS)
       return {
-        recommendedTimeWindow: winner,
-        microActionPrompt: promptForWindow(winner),
-        safetyNote: strongSafety ? SAFETY_NOTE_ACTIVE : SAFETY_NOTE_DEFAULT,
-        explanation,
-        scoreSnapshot: { ...scores },
-        painFeedbackSticky: sticky,
-        createdAt: new Date().toISOString(),
+        ...s,
+        lastRecommendation: {
+          ...rec,
+          createdAt: new Date().toISOString(),
+          profileContextSummary: {
+            preferredTimeRangesText,
+            mainBarriersText,
+          },
+        },
       }
     })
-  }, [userProfile, dailyContext, timingScores])
+    setAwaitingDuration(false)
+  }, [])
 
-  const appendFeedback = useCallback(
-    (response) => {
-      if (!lastRecommendation?.recommendedTimeWindow) return
+  const pushFeedback = useCallback((response, durationBucket) => {
+    setState((s) => {
+      if (!s.lastRecommendation) return s
+      const rec = s.lastRecommendation
+      const scoreBefore = {
+        timing: { ...s.timingScores },
+        tone: { ...s.toneScores },
+        content: { ...s.contentScores },
+      }
 
-      const window = lastRecommendation.recommendedTimeWindow
-      const scoreBefore = { ...timingScores }
-      const explanation = lastRecommendation.explanation || ''
-
-      const nextScores = { ...timingScores }
-      const lw = nextWindow(window)
-
-      if (response === 'Did it') nextScores[window] = (nextScores[window] ?? 0) + 2
-      else if (response === 'Partially did it')
-        nextScores[window] = (nextScores[window] ?? 0) + 1
-      else if (response === 'Skip') nextScores[window] = (nextScores[window] ?? 0) - 1
-      else if (response === 'Later') {
-        nextScores[window] = (nextScores[window] ?? 0) - 0.5
-        if (lw) nextScores[lw] = (nextScores[lw] ?? 0) + 1
-      } else if (response === 'Too tired')
-        nextScores[window] = (nextScores[window] ?? 0) - 1
-      else if (response === 'Pain/discomfort')
-        nextScores[window] = (nextScores[window] ?? 0) - 1
-
-      const scoreAfter = { ...nextScores }
+      const next = applyFeedbackToScores(
+        {
+          timingScores: s.timingScores,
+          toneScores: s.toneScores,
+          contentScores: s.contentScores,
+          durationStats: s.durationStats,
+        },
+        rec,
+        response,
+        durationBucket ?? null,
+      )
 
       const event = {
         timestamp: new Date().toISOString(),
-        recommendedTimeWindow: window,
         response,
-        dailyContext: { ...dailyContext },
+        durationBucket: durationBucket ?? null,
+        dailyContext: { ...s.dailyContext },
+        recommendation: {
+          timeSlotId: rec.timeSlotId,
+          tone: rec.tone,
+          microActionId: rec.microActionId,
+          suggestedDurationMinutes: rec.suggestedDurationMinutes,
+        },
         scoreBefore,
-        scoreAfter,
-        explanation,
+        scoreAfter: {
+          timing: { ...next.timingScores },
+          tone: { ...next.toneScores },
+          content: { ...next.contentScores },
+        },
       }
 
-      setTimingScores(nextScores)
-      setFeedbackHistory((hist) => [event, ...hist].slice(0, 50))
-
-      const painFeedback = response === 'Pain/discomfort'
-      const clearSticky = response === 'Did it' || response === 'Partially did it'
-      const sticky = clearSticky ? false : painFeedback ? true : lastRecommendation.painFeedbackSticky === true
-
-      const painTodayHigh = dailyContext.painToday >= 4
-      const painConcern = userProfile.painConcern === 'yes'
-      const strongSafety = painTodayHigh || sticky || painConcern
-
-      setLastRecommendation((lr) =>
-        lr
-          ? {
-              ...lr,
-              painFeedbackSticky: sticky,
-              safetyNote: strongSafety ? SAFETY_NOTE_ACTIVE : SAFETY_NOTE_DEFAULT,
-            }
-          : lr,
-      )
-    },
-    [lastRecommendation, dailyContext, timingScores, userProfile.painConcern],
-  )
-
-  const resetDemo = useCallback(() => {
-    const p = defaultUserProfile()
-    const d = defaultDailyContext()
-    const t = defaultTimingScores()
-    setUserProfile(p)
-    setDailyContext(d)
-    setTimingScores(t)
-    setFeedbackHistory([])
-    setLastRecommendation(null)
-    saveJson(STORAGE.userProfile, p)
-    saveJson(STORAGE.dailyContext, d)
-    saveJson(STORAGE.timingScores, t)
-    saveJson(STORAGE.feedbackHistory, [])
-    localStorage.removeItem(STORAGE.lastRecommendation)
+      return {
+        ...s,
+        timingScores: next.timingScores,
+        toneScores: next.toneScores,
+        contentScores: next.contentScores,
+        durationStats: next.durationStats,
+        feedbackHistory: [event, ...s.feedbackHistory].slice(0, 80),
+      }
+    })
   }, [])
 
-  const bestWindow = useMemo(
-    () => bestWindowFromScores(timingScores),
-    [timingScores],
+  const onYes = useCallback(() => {
+    setAwaitingDuration(true)
+  }, [])
+
+  const onDurationPick = useCallback(
+    (bucketId) => {
+      pushFeedback('Yes', bucketId)
+      setAwaitingDuration(false)
+    },
+    [pushFeedback],
   )
 
-  const bestScore = timingScores[bestWindow] ?? 0
+  const onNo = useCallback(() => {
+    pushFeedback('No', null)
+    setAwaitingDuration(false)
+  }, [pushFeedback])
 
-  if (!hydrated) {
-    return (
-      <div className="amate-app amate-loading">
-        <p>Loading your demo data…</p>
-      </div>
-    )
-  }
+  const onSkip = useCallback(() => {
+    pushFeedback('Skip', null)
+    setAwaitingDuration(false)
+  }, [pushFeedback])
+
+  const cancelDuration = useCallback(() => {
+    setAwaitingDuration(false)
+  }, [])
+
+  const onReset = useCallback(() => {
+    setAwaitingDuration(false)
+    setState(resetDemoData())
+  }, [])
+
+  const slotRows = useMemo(
+    () => topSlotsByScore(state.timingScores, 14),
+    [state.timingScores],
+  )
 
   return (
     <div className="amate-app">
       <header className="amate-header">
-        <h1>Adaptive Micro-Action Trigger Engine</h1>
+        <h1>Adaptive push prompt optimization (demo)</h1>
         <p className="amate-subtitle">
-          A demo that personalizes <strong>when</strong> a small activity prompt might fit
-          your day. The text of the prompts is fixed; only timing and scores adapt from your
-          inputs and feedback.
+          This prototype picks a <strong>push notification</strong> time, tone, micro-action,
+          and suggested duration using transparent rules and your feedback. Nothing here calls
+          an external AI service.
         </p>
         <p className="amate-disclaimer">{DISCLAIMER}</p>
       </header>
 
       <section className="amate-card" aria-labelledby="profile-heading">
-        <h2 id="profile-heading">Your profile</h2>
-        <p className="amate-hint">Used to bias timing toward windows that fit you.</p>
+        <h2 id="profile-heading">User profile</h2>
+        <p className="amate-hint">
+          Used for cold-start cohort matching and prompt scoring. Tap &quot;Save profile &amp;
+          match cohort&quot; after edits.
+        </p>
 
         <fieldset className="amate-fieldset">
-          <legend>Preferred time windows</legend>
+          <legend>Main barriers (select all that apply)</legend>
+          <p className="amate-hint amate-hint-tight">
+            Selected:{' '}
+            <span className="amate-selection-summary">
+              {formatIdListForDisplay(state.userProfile.mainBarriers, BARRIER_LABELS)}
+            </span>
+          </p>
           <div className="amate-chip-row">
-            {TIME_WINDOWS.map((w) => (
-              <label key={w} className="amate-chip">
+            {MAIN_BARRIER_IDS.map((id) => (
+              <label key={id} className="amate-chip">
                 <input
                   type="checkbox"
-                  checked={userProfile.preferredTimeWindows?.includes(w) ?? false}
-                  onChange={() => togglePreferredWindow(w)}
+                  checked={state.userProfile.mainBarriers.includes(id)}
+                  onChange={() => toggleBarrier(id)}
                 />
-                <span>{w}</span>
+                <span>{BARRIER_LABELS[id]}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <fieldset className="amate-fieldset">
+          <legend>Preferred time windows (select all that apply)</legend>
+          <p className="amate-hint amate-hint-tight">
+            Preferred time ranges:{' '}
+            <span className="amate-selection-summary">
+              {formatIdListForDisplay(state.userProfile.preferredTimeRanges, TIME_RANGE_LABELS)}
+            </span>
+          </p>
+          <div className="amate-chip-row">
+            {TIME_RANGE_OPTIONS.map((o) => (
+              <label key={o.id} className="amate-chip">
+                <input
+                  type="checkbox"
+                  checked={state.userProfile.preferredTimeRanges.includes(o.id)}
+                  onChange={() => toggleTimeRange(o.id)}
+                />
+                <span>{o.label}</span>
               </label>
             ))}
           </div>
         </fieldset>
 
         <label className="amate-label">
-          Main barrier today (for context in explanations)
-          <select
-            value={userProfile.mainBarrier}
-            onChange={(e) => updateProfileField('mainBarrier', e.target.value)}
-          >
-            {BARRIERS.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="amate-label">
           Baseline confidence
           <select
-            value={userProfile.baselineConfidence}
-            onChange={(e) => updateProfileField('baselineConfidence', e.target.value)}
+            value={state.userProfile.baselineConfidence}
+            onChange={(e) => updateProfile({ baselineConfidence: e.target.value })}
           >
             <option value="low">low</option>
             <option value="medium">medium</option>
             <option value="high">high</option>
-          </select>
-        </label>
-
-        <label className="amate-label">
-          Preferred prompt frequency
-          <select
-            value={userProfile.preferredPromptFrequency}
-            onChange={(e) =>
-              updateProfileField('preferredPromptFrequency', e.target.value)
-            }
-          >
-            <option value="once per day">once per day</option>
-            <option value="twice per day">twice per day</option>
           </select>
         </label>
 
@@ -483,8 +302,8 @@ export default function App() {
             <input
               type="radio"
               name="painConcern"
-              checked={userProfile.painConcern === 'yes'}
-              onChange={() => updateProfileField('painConcern', 'yes')}
+              checked={state.userProfile.painConcern === 'yes'}
+              onChange={() => updateProfile({ painConcern: 'yes' })}
             />
             yes
           </label>
@@ -492,63 +311,77 @@ export default function App() {
             <input
               type="radio"
               name="painConcern"
-              checked={userProfile.painConcern === 'no'}
-              onChange={() => updateProfileField('painConcern', 'no')}
+              checked={state.userProfile.painConcern === 'no'}
+              onChange={() => updateProfile({ painConcern: 'no' })}
             />
             no
           </label>
         </fieldset>
+
+        <label className="amate-label">
+          Preferred starting tone
+          <select
+            value={state.userProfile.preferredTone}
+            onChange={(e) => updateProfile({ preferredTone: e.target.value })}
+          >
+            {TONES.map((t) => (
+              <option key={t} value={t}>
+                {toneLabel(t)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <button type="button" className="amate-btn-secondary amate-btn-wide" onClick={saveProfileAndMatch}>
+          Save profile &amp; match cohort
+        </button>
       </section>
 
       <section className="amate-card" aria-labelledby="daily-heading">
-        <h2 id="daily-heading">Today&apos;s context</h2>
-        <p className="amate-hint">Update this whenever you want a fresh recommendation.</p>
+        <h2 id="daily-heading">Daily context check-in</h2>
+        <p className="amate-hint">Adjust anytime before generating a new recommendation.</p>
 
         <label className="amate-label">
-          Fatigue today (1 = low, 5 = high)
+          Fatigue today (1–5)
           <input
             type="range"
             min={1}
             max={5}
-            value={dailyContext.fatigueToday}
-            onChange={(e) =>
-              updateDailyField('fatigueToday', Number(e.target.value))
-            }
+            value={state.dailyContext.fatigueToday}
+            onChange={(e) => updateDaily({ fatigueToday: Number(e.target.value) })}
           />
-          <span className="amate-range-value">{dailyContext.fatigueToday}</span>
+          <span className="amate-range-value">{state.dailyContext.fatigueToday}</span>
         </label>
 
         <label className="amate-label">
-          Pain today (0 = none, 5 = high)
+          Pain today (0–5)
           <input
             type="range"
             min={0}
             max={5}
-            value={dailyContext.painToday}
-            onChange={(e) => updateDailyField('painToday', Number(e.target.value))}
+            value={state.dailyContext.painToday}
+            onChange={(e) => updateDaily({ painToday: Number(e.target.value) })}
           />
-          <span className="amate-range-value">{dailyContext.painToday}</span>
+          <span className="amate-range-value">{state.dailyContext.painToday}</span>
         </label>
 
         <label className="amate-label">
-          Motivation today (1 = low, 5 = high)
+          Motivation today (1–5)
           <input
             type="range"
             min={1}
             max={5}
-            value={dailyContext.motivationToday}
-            onChange={(e) =>
-              updateDailyField('motivationToday', Number(e.target.value))
-            }
+            value={state.dailyContext.motivationToday}
+            onChange={(e) => updateDaily({ motivationToday: Number(e.target.value) })}
           />
-          <span className="amate-range-value">{dailyContext.motivationToday}</span>
+          <span className="amate-range-value">{state.dailyContext.motivationToday}</span>
         </label>
 
         <label className="amate-label">
           Weather
           <select
-            value={dailyContext.weather}
-            onChange={(e) => updateDailyField('weather', e.target.value)}
+            value={state.dailyContext.weather}
+            onChange={(e) => updateDaily({ weather: e.target.value })}
           >
             <option value="good">good</option>
             <option value="bad">bad</option>
@@ -559,10 +392,8 @@ export default function App() {
         <label className="amate-label">
           Availability today
           <select
-            value={dailyContext.availabilityToday}
-            onChange={(e) =>
-              updateDailyField('availabilityToday', e.target.value)
-            }
+            value={state.dailyContext.availabilityToday}
+            onChange={(e) => updateDaily({ availabilityToday: e.target.value })}
           >
             <option value="low">low</option>
             <option value="medium">medium</option>
@@ -573,109 +404,229 @@ export default function App() {
 
       <section className="amate-card amate-actions">
         <button type="button" className="amate-btn-primary" onClick={generateRecommendation}>
-          Generate Recommended Trigger Time
+          Generate recommended push prompt
         </button>
       </section>
 
-      {lastRecommendation && (
+      {state.lastRecommendation && (
         <section className="amate-card amate-result" aria-live="polite">
-          <h2>Your recommendation</h2>
-          <dl className="amate-dl">
-            <div>
-              <dt>Recommended time window</dt>
-              <dd>{lastRecommendation.recommendedTimeWindow}</dd>
+          <h2>Recommended prompt (push)</h2>
+          {state.lastRecommendation.profileContextSummary && (
+            <div className="amate-context-lines" role="note">
+              <p>
+                <strong>Preferred time ranges:</strong>{' '}
+                {state.lastRecommendation.profileContextSummary.preferredTimeRangesText}
+              </p>
+              <p>
+                <strong>Selected barriers:</strong>{' '}
+                {state.lastRecommendation.profileContextSummary.mainBarriersText}
+              </p>
             </div>
-            <div>
-              <dt>Micro-action prompt</dt>
-              <dd className="amate-prompt">{lastRecommendation.microActionPrompt}</dd>
-            </div>
-            <div>
-              <dt>Safety-aware note</dt>
-              <dd>{lastRecommendation.safetyNote}</dd>
-            </div>
-            <div>
-              <dt>Why this time</dt>
-              <dd>
-                <pre className="amate-explanation">{lastRecommendation.explanation}</pre>
-              </dd>
-            </div>
-            <div>
-              <dt>Score snapshot (all windows)</dt>
-              <dd className="amate-mono">{formatScores(lastRecommendation.scoreSnapshot)}</dd>
-            </div>
-          </dl>
-
-          <p className="amate-feedback-label">How did it go?</p>
-          <div className="amate-feedback-grid">
-            {[
-              'Did it',
-              'Partially did it',
-              'Skip',
-              'Later',
-              'Too tired',
-              'Pain/discomfort',
-            ].map((label) => (
-              <button
-                type="button"
-                key={label}
-                className="amate-btn-secondary"
-                onClick={() => appendFeedback(label)}
-              >
-                {label}
-              </button>
-            ))}
+          )}
+          <div className="amate-push-meta">
+            <span className="amate-badge">{state.lastRecommendation.timeSlotLabel}</span>
+            <span className="amate-badge amate-tone">{toneLabel(state.lastRecommendation.tone)}</span>
+            <span className="amate-badge">{state.lastRecommendation.microActionLabel}</span>
+            <span className="amate-badge">
+              ~{state.lastRecommendation.suggestedDurationMinutes} min suggested
+            </span>
+            {state.lastRecommendation.safetyMode && (
+              <span className="amate-badge amate-safety">Safety mode</span>
+            )}
           </div>
+          <p className="amate-push-body">{state.lastRecommendation.renderedPrompt}</p>
+          {state.lastRecommendation.safetyReasons?.length > 0 && (
+            <ul className="amate-safety-list">
+              {state.lastRecommendation.safetyReasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+          <details className="amate-details">
+            <summary>Score breakdown (transparent)</summary>
+            <pre className="amate-pre">
+              {JSON.stringify(state.lastRecommendation.scoreBreakdown, null, 2)}
+            </pre>
+          </details>
+
+          {!awaitingDuration && (
+            <div className="amate-feedback-row">
+              <button type="button" className="amate-btn-yes" onClick={onYes}>
+                Yes
+              </button>
+              <button type="button" className="amate-btn-secondary" onClick={onNo}>
+                No
+              </button>
+              <button type="button" className="amate-btn-secondary" onClick={onSkip}>
+                Skip
+              </button>
+            </div>
+          )}
+
+          {awaitingDuration && (
+            <div className="amate-followup">
+              <p className="amate-feedback-label">How long did you move?</p>
+              <div className="amate-duration-grid">
+                {DURATION_OPTIONS.map((opt) => (
+                  <button
+                    type="button"
+                    key={opt.id}
+                    className="amate-btn-secondary"
+                    onClick={() => onDurationPick(opt.id)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="amate-btn-link" onClick={cancelDuration}>
+                Cancel
+              </button>
+            </div>
+          )}
         </section>
       )}
 
       <section className="amate-card" aria-labelledby="dash-heading">
         <h2 id="dash-heading">Personalization dashboard</h2>
+
+        <div className="amate-profile-banner">
+          <p>
+            <strong>Preferred time ranges:</strong>{' '}
+            {formatIdListForDisplay(state.userProfile.preferredTimeRanges, TIME_RANGE_LABELS)}
+          </p>
+          <p>
+            <strong>Selected barriers:</strong>{' '}
+            {formatIdListForDisplay(state.userProfile.mainBarriers, BARRIER_LABELS)}
+          </p>
+        </div>
+
         <div className="amate-dash-grid">
           <div className="amate-stat">
-            <h3>Timing scores (from your feedback)</h3>
-            <ul className="amate-score-list">
-              {TIME_WINDOWS.map((w) => (
-                <li key={w}>
-                  <span>{w}</span>
-                  <span className="amate-mono">{(timingScores[w] ?? 0).toFixed(2)}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="amate-stat">
-            <h3>Best current time window</h3>
-            <p className="amate-big">
-              {bestWindow}
-              <span className="amate-muted amate-mono"> ({bestScore.toFixed(2)})</span>
+            <h3>Matched cohort</h3>
+            <p className="amate-big">{analytics.matchedCohortLabel}</p>
+            <p className="amate-muted amate-small">
+              Match score: {analytics.cohortMatchScore} (internal similarity score for the demo)
             </p>
           </div>
           <div className="amate-stat">
-            <h3>Feedback events</h3>
-            <p className="amate-big">{feedbackHistory.length}</p>
+            <h3>Personalization level</h3>
+            <p className="amate-big">{analytics.personalizationLevel}%</p>
+            <p className="amate-muted amate-small">Grows with feedback volume and score spread.</p>
           </div>
           <div className="amate-stat">
-            <h3>Safety mode</h3>
-            <p className="amate-big">{safetyModeActive ? 'On' : 'Off'}</p>
+            <h3>Responses</h3>
+            <p className="amate-small">
+              Yes {Math.round(analytics.yesRate * 100)}% · No {Math.round(analytics.noRate * 100)}%
+              · Skip {Math.round(analytics.skipRate * 100)}%
+            </p>
+            <p className="amate-muted amate-small">n = {analytics.feedbackCount}</p>
+          </div>
+          <div className="amate-stat">
+            <h3>Notification burden</h3>
+            <p className="amate-big">{analytics.notificationBurdenLevel}</p>
             <p className="amate-muted amate-small">
-              On when pain today is high on the slider, you marked a pain concern in your
-              profile, or after &quot;Pain/discomfort&quot; feedback (cleared when you tap
-              &quot;Did it&quot; or &quot;Partially did it&quot;, or when you reset demo data).
+              Recent No/Skip rate: {Math.round(analytics.notificationBurdenRate * 100)}%
             </p>
           </div>
         </div>
 
+        <div className="amate-stat amate-stat-span">
+          <h3>Average movement duration (self-reported after Yes)</h3>
+          <p className="amate-big">
+            {analytics.averageMovementDuration != null
+              ? `${analytics.averageMovementDuration} min (midpoint estimate)`
+              : '—'}
+          </p>
+        </div>
+
+        <div className="amate-triple">
+          <div className="amate-stat">
+            <h3>Best time slot (scores)</h3>
+            <p className="amate-big">{analytics.bestTimeSlot}</p>
+            <p className="amate-muted amate-mono">{analytics.bestTimeSlotScore}</p>
+          </div>
+          <div className="amate-stat">
+            <h3>Best tone</h3>
+            <p className="amate-big">{toneLabel(analytics.bestTone)}</p>
+            <p className="amate-muted amate-mono">{analytics.bestToneScore}</p>
+          </div>
+          <div className="amate-stat">
+            <h3>Best content</h3>
+            <p className="amate-big">
+              {getMicroActionById(analytics.bestContent)?.label ?? analytics.bestContent}
+            </p>
+            <p className="amate-muted amate-mono">{analytics.bestContentScore}</p>
+          </div>
+        </div>
+
+        <h3 className="amate-history-title">Timing scores (top slots)</h3>
+        <ul className="amate-slot-list">
+          {slotRows.map((row) => (
+            <li key={row.id}>
+              <span>{row.label}</span>
+              <span className="amate-mono">{(row.score ?? 0).toFixed(2)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <h3 className="amate-history-title">Tone scores</h3>
+        <ul className="amate-score-list">
+          {TONES.map((t) => (
+            <li key={t}>
+              <span>{toneLabel(t)}</span>
+              <span className="amate-mono">{(state.toneScores[t] ?? 0).toFixed(2)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <h3 className="amate-history-title">Content scores</h3>
+        <ul className="amate-score-list">
+          {MICRO_ACTIONS.map((a) => (
+            <li key={a.id}>
+              <span>{a.label}</span>
+              <span className="amate-mono">{(state.contentScores[a.id] ?? 0).toFixed(2)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <h3 className="amate-history-title">Average duration by time slot (where reported)</h3>
+        {Object.keys(analytics.averageDurationBySlot).length === 0 ? (
+          <p className="amate-muted">No duration answers yet.</p>
+        ) : (
+          <ul className="amate-score-list">
+            {Object.entries(analytics.averageDurationBySlot)
+              .sort((a, b) => b[1] - a[1])
+              .map(([slotId, avg]) => (
+                <li key={slotId}>
+                  <span>{slotId}</span>
+                  <span className="amate-mono">{avg} min</span>
+                </li>
+              ))}
+          </ul>
+        )}
+
+        <h3 className="amate-history-title">Micro-action reference</h3>
+        <ul className="amate-micro-ref">
+          {MICRO_ACTIONS.map((a) => (
+            <li key={a.id}>
+              <strong>{a.label}</strong> — {a.description} (default ~{a.defaultDuration} min,{' '}
+              {a.intensity})
+            </li>
+          ))}
+        </ul>
+
         <h3 className="amate-history-title">Recent feedback</h3>
-        {feedbackHistory.length === 0 ? (
+        {state.feedbackHistory.length === 0 ? (
           <p className="amate-muted">No feedback yet.</p>
         ) : (
           <ul className="amate-history">
-            {feedbackHistory.slice(0, 8).map((ev, idx) => (
+            {state.feedbackHistory.slice(0, 10).map((ev, idx) => (
               <li key={`${ev.timestamp}-${idx}`}>
                 <span className="amate-mono">{new Date(ev.timestamp).toLocaleString()}</span>
                 {' — '}
                 <strong>{ev.response}</strong>
-                {' @ '}
-                {ev.recommendedTimeWindow}
+                {ev.durationBucket ? ` (${ev.durationBucket})` : ''} @ {ev.recommendation.timeSlotId}{' '}
+                / {toneLabel(ev.recommendation.tone)} / {ev.recommendation.microActionId}
               </li>
             ))}
           </ul>
@@ -683,7 +634,7 @@ export default function App() {
       </section>
 
       <footer className="amate-footer">
-        <button type="button" className="amate-btn-danger" onClick={resetDemo}>
+        <button type="button" className="amate-btn-danger" onClick={onReset}>
           Reset demo data
         </button>
       </footer>
