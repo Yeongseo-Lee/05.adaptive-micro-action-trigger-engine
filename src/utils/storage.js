@@ -12,7 +12,6 @@ export const MAIN_BARRIER_IDS = [
   'pain',
   'low_motivation',
   'weather',
-  'other',
 ]
 
 export const TIME_RANGE_LABELS = {
@@ -28,7 +27,6 @@ export const BARRIER_LABELS = {
   pain: 'pain',
   low_motivation: 'low motivation',
   weather: 'weather',
-  other: 'other',
 }
 
 /** @typedef {{ mainBarriers: string[], preferredTimeRanges: string[], baselineConfidence: string, painConcern: string, preferredTone: string }} UserProfileV2 */
@@ -56,7 +54,6 @@ const LEGACY_BARRIER_TO_ID = {
   pain: 'pain',
   'low motivation': 'low_motivation',
   weather: 'weather',
-  other: 'other',
 }
 
 /**

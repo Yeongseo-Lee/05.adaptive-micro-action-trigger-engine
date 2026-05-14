@@ -87,7 +87,7 @@ export const COHORT_PROFILES = [
     preferredContentIds: ['indoor_walk', 'gentle_stretching', 'after_meal_walk'],
     preferredDurationMinutes: 3,
     matchHints: {
-      barriers: ['other', 'lack_of_time'],
+      barriers: ['lack_of_time'],
       confidence: ['medium', 'high'],
       timeRanges: ['morning', 'afternoon'],
     },
