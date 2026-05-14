@@ -2,6 +2,13 @@
 
 A context-aware timing optimization prototype that adapts micro-action prompts based on user feedback, health constraints, and response patterns.
 
+
+## Live Demo
+
+[Open the live app](https://05-adaptive-micro-action-trigger-en.vercel.app/)
+
+A context-aware timing optimization prototype that adapts micro-action prompts based on user feedback, health constraints, and response patterns.
+
 ## Overview
 
 This project is a React-based digital health prototype that demonstrates an adaptive timing engine for low-burden health behavior prompts.
