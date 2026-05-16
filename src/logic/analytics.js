@@ -3,7 +3,7 @@ import { TONES } from '../data/promptTemplates.js'
 import { MICRO_ACTION_IDS } from '../data/microActions.js'
 import { getCohortById } from '../data/cohortProfiles.js'
 import { computeBurden } from './burdenScorer.js'
-import { midpointForBucket, normalizeResponse } from './feedbackUpdater.js'
+import { midpointForBucket, normalizeDurationBucket, normalizeResponse } from './feedbackUpdater.js'
 
 function bestKey(scores, keys) {
   let best = keys[0]
@@ -37,9 +37,8 @@ function bestRate(stats, fallbackKey) {
   let best = fallbackKey
   let bestV = -1
   for (const [key, row] of Object.entries(stats)) {
-    const shown = row.yes + row.no + row.skip
-    if (shown === 0) continue
-    const rate = row.yes / shown
+    if (row.yes < 1 && row.totalPrompts < 3) continue
+    const rate = row.yesRate
     if (rate > bestV) {
       bestV = rate
       best = key
@@ -71,6 +70,64 @@ function personalizationFromState(state) {
   return Math.max(8, level)
 }
 
+function personalizationLabel(feedbackCount) {
+  if (feedbackCount < 5) return 'Low'
+  if (feedbackCount < 15) return 'Med'
+  return 'High'
+}
+
+export function buildTimeSlotAnalytics(feedbackHistory) {
+  const bySlot = Object.fromEntries(
+    TIME_SLOT_IDS.map((slotId) => [
+      slotId,
+      {
+        timeSlot: slotId,
+        totalPrompts: 0,
+        yes: 0,
+        no: 0,
+        skip: 0,
+        yesRate: 0,
+        averageActualDurationMinutes: null,
+        burdenSignal: 0,
+      },
+    ]),
+  )
+
+  for (const row of feedbackHistory ?? []) {
+    const slot = row.timeSlot ?? row.recommendation?.timeSlotId
+    if (!bySlot[slot]) continue
+    const response = normalizeResponse(row.response)
+    if (response !== 'yes' && response !== 'no' && response !== 'skip') continue
+
+    const cell = bySlot[slot]
+    cell.totalPrompts += 1
+    cell[response] += 1
+
+    if (response === 'yes') {
+      const actualDuration = normalizeDurationBucket(row.actualDuration ?? row.durationBucket)
+      const minutes = midpointForBucket(actualDuration)
+      if (minutes) {
+        cell.durationSum = (cell.durationSum ?? 0) + minutes
+        cell.durationCount = (cell.durationCount ?? 0) + 1
+      }
+    }
+  }
+
+  for (const cell of Object.values(bySlot)) {
+    cell.yesRate = cell.totalPrompts
+      ? Math.round((cell.yes / cell.totalPrompts) * 1000) / 1000
+      : 0
+    cell.averageActualDurationMinutes = cell.durationCount
+      ? Math.round((cell.durationSum / cell.durationCount) * 10) / 10
+      : null
+    cell.burdenSignal = cell.no + cell.skip
+    delete cell.durationSum
+    delete cell.durationCount
+  }
+
+  return bySlot
+}
+
 /**
  * @param {import('../utils/storage.js').AppStateV2} state
  */
@@ -80,16 +137,10 @@ export function computeAnalytics(state) {
   let no = 0
   let skip = 0
   const durationSamples = []
-  const responseBySlot = {}
+  const timeSlotAnalytics = buildTimeSlotAnalytics(hist)
 
   for (const row of hist) {
     const response = normalizeResponse(row.response)
-    const slot = row.timeSlot ?? row.recommendation?.timeSlotId
-    if (slot) {
-      responseBySlot[slot] = responseBySlot[slot] ?? { yes: 0, no: 0, skip: 0 }
-      if (responseBySlot[slot][response] !== undefined) responseBySlot[slot][response] += 1
-    }
-
     if (response === 'yes') {
       yes++
       const actualDuration = row.actualDuration ?? row.durationBucket
@@ -131,12 +182,12 @@ export function computeAnalytics(state) {
   }
 
   const yesRateByTimeSlot = {}
-  for (const [slotId, row] of Object.entries(responseBySlot)) {
-    const shown = row.yes + row.no + row.skip
-    yesRateByTimeSlot[slotId] = shown ? Math.round((row.yes / shown) * 1000) / 1000 : 0
+  for (const [slotId, row] of Object.entries(timeSlotAnalytics)) {
+    yesRateByTimeSlot[slotId] = row.yesRate
   }
-  const bestSlotByYes = bestRate(responseBySlot, bestSlot.key)
-  const bestSlotByDuration = bestAverage(bySlotAverages, bestSlot.key)
+  const fallbackStartSlot = cohort?.preferredSlotIds?.[0] ?? bestSlot.key
+  const bestSlotByYes = bestRate(timeSlotAnalytics, fallbackStartSlot)
+  const bestSlotByDuration = bestAverage(bySlotAverages, '—')
 
   return {
     yesRate,
@@ -146,6 +197,7 @@ export function computeAnalytics(state) {
     averageDurationBySlot: bySlotAverages,
     averageDurationByContent: byContentAverages,
     globalAverageFromStats: averageFromCells(state.durationStats?.bySlot),
+    timeSlotAnalytics,
     yesRateByTimeSlot,
     bestTimeSlotByYesRate: bestSlotByYes.key,
     bestTimeSlotByYesRateValue: Math.round(bestSlotByYes.value * 1000) / 1000,
@@ -158,6 +210,7 @@ export function computeAnalytics(state) {
     bestContent: bestContent.key,
     bestContentScore: Math.round(bestContent.value * 100) / 100,
     personalizationLevel: personalizationFromState(state),
+    personalizationLevelLabel: personalizationLabel(hist.length),
     matchedCohortId: state.matchedCohortId,
     matchedCohortLabel: cohort?.label ?? '—',
     cohortMatchScore: state.cohortMatchScore ?? 0,

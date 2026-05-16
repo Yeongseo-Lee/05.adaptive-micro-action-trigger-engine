@@ -3,6 +3,8 @@ import { TONES, renderPromptTemplate } from '../data/promptTemplates.js'
 import { MICRO_ACTIONS, getMicroActionById } from '../data/microActions.js'
 import { evaluateSafety } from './safetyFilter.js'
 import { computeBurden } from './burdenScorer.js'
+import { buildTimeSlotAnalytics } from './analytics.js'
+import { normalizeResponse } from './feedbackUpdater.js'
 
 function durationLabel(minutes) {
   if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`
@@ -68,23 +70,14 @@ function userPreferredSlotBonuses(profile, slotId) {
   return Math.min(bonus, 1.1)
 }
 
-function normalizeResponse(response) {
-  const value = String(response ?? '').toLowerCase()
-  if (value === 'done') return 'yes'
-  return value
-}
-
 function responseStats(feedbackHistory) {
-  const bySlot = {}
   const byTone = {}
   const byContent = {}
   for (const row of feedbackHistory ?? []) {
     const response = normalizeResponse(row.response)
-    const slot = row.timeSlot ?? row.recommendation?.timeSlotId
     const tone = row.tone ?? row.recommendation?.tone
     const content = row.content ?? row.action ?? row.recommendation?.microActionId
     for (const [map, key] of [
-      [bySlot, slot],
       [byTone, tone],
       [byContent, content],
     ]) {
@@ -94,19 +87,51 @@ function responseStats(feedbackHistory) {
       if (response === 'yes' || response === 'no' || response === 'skip') map[key].total += 1
     }
   }
-  return { bySlot, byTone, byContent }
+  return { byTone, byContent }
 }
 
-function yesRateTerm(stats, key) {
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value))
+}
+
+function learnedScore(value) {
+  return clamp01(0.5 + (value ?? 0) / 4)
+}
+
+function yesRateScore(stats, key) {
   const row = stats[key]
-  if (!row?.total) return 0
-  const confidence = Math.min(1, row.total / 5)
-  return ((row.yes / row.total) - 0.5) * confidence * 1.2
+  if (!row?.total) return 0.5
+  return clamp01(row.yes / row.total)
 }
 
 function averageDurationCell(cell) {
   if (!cell?.count) return 0
   return cell.sum / cell.count
+}
+
+function profileSlotDefault(userProfile, matchedCohort, slotId) {
+  const profileBonus = userPreferredSlotBonuses(userProfile, slotId) > 0 ? 0.12 : 0
+  const cohortBonus = matchedCohort?.preferredSlotIds?.includes(slotId) ? 0.14 : 0
+  return clamp01(0.44 + profileBonus + cohortBonus)
+}
+
+function slotYesLikelihood(slotStats, userProfile, matchedCohort, slotId, dataLimited) {
+  const row = slotStats[slotId]
+  if (row?.totalPrompts > 0) return row.yesRate
+  if (dataLimited) return profileSlotDefault(userProfile, matchedCohort, slotId)
+  return 0.45
+}
+
+function expectedDurationScore(slotStats, durationStats, matchedCohort, slotId, actionId, action) {
+  const slotAvg = slotStats[slotId]?.averageActualDurationMinutes ?? averageDurationCell(durationStats?.bySlot?.[slotId])
+  const contentAvg = averageDurationCell(durationStats?.byContent?.[actionId])
+  const expectedDuration = slotAvg && contentAvg
+    ? (slotAvg + contentAvg) / 2
+    : slotAvg || contentAvg || matchedCohort?.preferredDurationMinutes || action.defaultDuration
+  return {
+    expectedDuration,
+    score: clamp01(expectedDuration / 10),
+  }
 }
 
 /**
@@ -125,6 +150,8 @@ export function optimizePrompt({
 }) {
   const burden = computeBurden(feedbackHistory)
   const behavior = responseStats(feedbackHistory)
+  const slotStats = buildTimeSlotAnalytics(feedbackHistory)
+  const dataLimited = (feedbackHistory?.length ?? 0) < 5
   let best = null
   let bestTotal = -Infinity
 
@@ -141,39 +168,47 @@ export function optimizePrompt({
           const cScore = contentScores[action.id] ?? 0
           const cohortP = cohortPriorScore(matchedCohort, slot.id, tone, action.id, durationMinutes)
           const ctxFit = dailyContextFit(dailyContext, action, tone, slot)
-          const prefBias = userPreferredSlotBonuses(userProfile, slot.id)
-          const yesLikelihoodTerm =
-            yesRateTerm(behavior.bySlot, slot.id) +
-            yesRateTerm(behavior.byTone, tone) * 0.5 +
-            yesRateTerm(behavior.byContent, action.id) * 0.5
-          const slotAvg = averageDurationCell(durationStats?.bySlot?.[slot.id])
-          const contentAvg = averageDurationCell(durationStats?.byContent?.[action.id])
-          const expectedDuration = slotAvg && contentAvg
-            ? (slotAvg + contentAvg) / 2
-            : slotAvg || contentAvg
-          const durationTerm = expectedDuration ? Math.min(1.2, (expectedDuration / 10) * 1.2) : 0
-
-          const timingTerm = 1.0 * tScore
-          const toneTerm = 1.0 * tnScore
-          const contentTerm = 1.0 * cScore
-          const cohortTerm = 1.2 * cohortP
-          const contextTerm = 1.0 * ctxFit + prefBias
+          const yesLikelihoodScore = slotYesLikelihood(
+            slotStats,
+            userProfile,
+            matchedCohort,
+            slot.id,
+            dataLimited,
+          )
+          const duration = expectedDurationScore(
+            slotStats,
+            durationStats,
+            matchedCohort,
+            slot.id,
+            action.id,
+            action,
+          )
+          const toneScore = clamp01(
+            (learnedScore(tnScore) + yesRateScore(behavior.byTone, tone)) / 2 +
+              (userProfile.preferredTone === tone || matchedCohort?.preferredTone === tone ? 0.08 : 0),
+          )
+          const contentScore = clamp01(
+            (learnedScore(cScore) + yesRateScore(behavior.byContent, action.id)) / 2 +
+              (matchedCohort?.preferredContentIds?.includes(action.id) ? 0.08 : 0),
+          )
+          const cohortPriorScoreValue = clamp01(cohortP / 3.7)
+          const contextFitScore = clamp01(0.5 + ctxFit / 2)
           const safetyPen = safety.safetyPenalty + (safety.safetyMode ? 0.15 : 0)
-          let burdenPenalty = burden.penalty
+          let burdenPenalty = burden.penalty + (slotStats[slot.id]?.burdenSignal ?? 0) * 0.1
           if (burden.level === 'high' && (tone === 'risk_framed' || tone === 'motivational')) {
             burdenPenalty += 0.35
           }
 
           const total =
-            timingTerm +
-            toneTerm +
-            contentTerm +
-            cohortTerm +
-            contextTerm -
+            yesLikelihoodScore * 0.35 +
+            duration.score * 0.25 +
+            toneScore * 0.15 +
+            contentScore * 0.15 +
+            cohortPriorScoreValue * 0.1 +
+            contextFitScore * 0.1 +
+            learnedScore(tScore) * 0.05 -
             safetyPen -
-            burdenPenalty +
-            yesLikelihoodTerm +
-            durationTerm
+            burdenPenalty
 
           if (total > bestTotal) {
             bestTotal = total
@@ -195,16 +230,19 @@ export function optimizePrompt({
               safetyMode: safety.safetyMode,
               safetyReasons: safety.reasons,
               scoreBreakdown: {
-                timingTerm,
-                toneTerm,
-                contentTerm,
-                cohortTerm,
-                contextTerm,
+                yesLikelihoodScore,
+                expectedDurationScore: duration.score,
+                toneScore,
+                contentScore,
+                cohortPriorScore: cohortPriorScoreValue,
+                contextFitScore,
+                timingScore: learnedScore(tScore),
                 safetyPenalty: safetyPen,
                 burdenPenalty,
-                yesLikelihoodTerm,
-                durationTerm,
-                expectedDuration: expectedDuration ? Math.round(expectedDuration * 10) / 10 : null,
+                expectedDuration: duration.expectedDuration
+                  ? Math.round(duration.expectedDuration * 10) / 10
+                  : null,
+                dataLimited,
                 total,
               },
             }
@@ -237,16 +275,17 @@ export function optimizePrompt({
       safetyMode: safety.safetyMode,
       safetyReasons: ['Fallback: safest default prompt while filters were tight.'],
       scoreBreakdown: {
-        timingTerm: 0,
-        toneTerm: 0,
-        contentTerm: 0,
-        cohortTerm: 0,
-        contextTerm: 0,
+        yesLikelihoodScore: 0,
+        expectedDurationScore: 0,
+        toneScore: 0,
+        contentScore: 0,
+        cohortPriorScore: 0,
+        contextFitScore: 0,
+        timingScore: 0,
         safetyPenalty: 0,
         burdenPenalty: 0,
-        yesLikelihoodTerm: 0,
-        durationTerm: 0,
         expectedDuration: null,
+        dataLimited: true,
         total: 0,
       },
     }
