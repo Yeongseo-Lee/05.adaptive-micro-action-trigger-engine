@@ -72,8 +72,14 @@ function personalizationFromState(state) {
 
 function personalizationLabel(feedbackCount) {
   if (feedbackCount < 5) return 'Low'
-  if (feedbackCount < 15) return 'Med'
+  if (feedbackCount < 15) return 'Medium'
   return 'High'
+}
+
+function personalizationNote(feedbackCount) {
+  if (feedbackCount < 5) return 'Mostly based on your profile.'
+  if (feedbackCount < 15) return 'Blending profile and feedback.'
+  return 'Mostly based on your feedback.'
 }
 
 export function buildTimeSlotAnalytics(feedbackHistory) {
@@ -211,6 +217,7 @@ export function computeAnalytics(state) {
     bestContentScore: Math.round(bestContent.value * 100) / 100,
     personalizationLevel: personalizationFromState(state),
     personalizationLevelLabel: personalizationLabel(hist.length),
+    personalizationNote: personalizationNote(hist.length),
     matchedCohortId: state.matchedCohortId,
     matchedCohortLabel: cohort?.label ?? '—',
     cohortMatchScore: state.cohortMatchScore ?? 0,

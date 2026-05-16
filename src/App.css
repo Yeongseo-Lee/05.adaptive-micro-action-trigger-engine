@@ -444,6 +444,38 @@
   color: var(--amate-accent-dark);
 }
 
+.amate-pill-light {
+  background: rgba(248, 250, 252, 0.72);
+  color: var(--amate-text);
+  border-color: rgba(229, 231, 235, 0.8);
+}
+
+.amate-status-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: -0.35rem auto 0.85rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--amate-accent-border);
+  background: var(--amate-accent-soft);
+  color: var(--amate-accent-dark);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.amate-notification-message {
+  margin: 0 auto 0.65rem;
+  max-width: 30rem;
+  font-size: clamp(1.35rem, 4vw, 2rem);
+  line-height: 1.16;
+  letter-spacing: -0.04em;
+  font-weight: 650;
+  color: var(--amate-text-strong);
+  text-align: center;
+}
+
 .amate-safety-inline {
   margin: 0 0 0.65rem;
   font-size: 0.72rem;
@@ -505,10 +537,74 @@
   text-align: center;
 }
 
+.amate-future-note {
+  margin-top: -0.25rem;
+  margin-bottom: 0.85rem;
+}
+
+.amate-notification-control {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0.2rem auto 0.4rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--amate-border);
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.amate-notification-title,
+.amate-notification-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--amate-text);
+}
+
+.amate-btn-mini {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.28rem 0.58rem;
+  border-radius: 999px;
+  border: 1px solid var(--amate-border-strong);
+  background: var(--amate-card);
+  color: var(--amate-text-strong);
+  cursor: pointer;
+}
+
+.amate-btn-mini:hover {
+  border-color: var(--amate-accent-border);
+  background: var(--amate-accent-soft);
+}
+
+.amate-notification-note {
+  margin-bottom: 0.75rem;
+}
+
 .amate-details-min {
   margin-bottom: 1rem;
   font-size: 0.78rem;
   text-align: center;
+}
+
+.amate-engine-details {
+  margin-top: 0.65rem;
+  opacity: 0.88;
+}
+
+.amate-hero-kv-engine {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 32rem;
+  margin-top: 0.7rem;
+  margin-bottom: 0.65rem;
+}
+
+@media (min-width: 520px) {
+  .amate-hero-kv-engine {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .amate-detail-copy {
@@ -677,6 +773,12 @@
   text-align: center;
 }
 
+.amate-profile-note {
+  margin-top: -0.65rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.72rem;
+}
+
 .amate-tiles {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -827,6 +929,8 @@
 
 .amate-footer {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
   justify-content: center;
   padding-top: 0.5rem;
 }

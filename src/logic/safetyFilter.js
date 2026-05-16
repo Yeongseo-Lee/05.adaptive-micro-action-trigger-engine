@@ -29,6 +29,11 @@ export function evaluateSafety(dailyContext, userProfile, microActionId) {
     reasons.push('Higher pain today: favor actions marked suitable for pain.')
   }
 
+  if (painHigh && !['ankle_movement', 'standing_movement', 'gentle_stretching'].includes(action.id)) {
+    actionPenalty += 0.7
+    reasons.push('Higher pain today: keeping the action lower-load.')
+  }
+
   if (fatigueHigh && !action.suitableForFatigue) {
     actionPenalty += 1.5
     reasons.push('Higher fatigue today: favor lower-demand movements.')

@@ -20,6 +20,9 @@ export const COHORT_PROFILES = [
     preferredTone: 'gentle',
     preferredContentIds: ['standing_movement', 'ankle_movement'],
     preferredDurationMinutes: 2,
+    burdenSensitivity: 'high',
+    toneBoosts: { gentle: 1, structured: 0.35 },
+    contentBoosts: { standing_movement: 1, ankle_movement: 0.85 },
     matchHints: {
       barriers: ['lack_of_time', 'low_motivation'],
       confidence: ['low'],
@@ -42,6 +45,9 @@ export const COHORT_PROFILES = [
     preferredTone: 'gentle',
     preferredContentIds: ['ankle_movement', 'standing_movement', 'indoor_walk'],
     preferredDurationMinutes: 2,
+    burdenSensitivity: 'high',
+    toneBoosts: { gentle: 1, informational: 0.35 },
+    contentBoosts: { ankle_movement: 1, standing_movement: 0.9, indoor_walk: 0.55 },
     matchHints: {
       barriers: ['fatigue'],
       confidence: ['low', 'medium'],
@@ -64,6 +70,9 @@ export const COHORT_PROFILES = [
     preferredTone: 'informational',
     preferredContentIds: ['ankle_movement', 'standing_movement', 'indoor_walk'],
     preferredDurationMinutes: 2,
+    burdenSensitivity: 'high',
+    toneBoosts: { gentle: 0.8, informational: 1 },
+    contentBoosts: { ankle_movement: 1, standing_movement: 0.9, indoor_walk: 0.45 },
     matchHints: {
       barriers: ['pain'],
       painConcern: true,
@@ -86,6 +95,9 @@ export const COHORT_PROFILES = [
     preferredTone: 'informational',
     preferredContentIds: ['indoor_walk', 'gentle_stretching', 'after_meal_walk'],
     preferredDurationMinutes: 3,
+    burdenSensitivity: 'medium',
+    toneBoosts: { informational: 1, structured: 0.65 },
+    contentBoosts: { indoor_walk: 1, gentle_stretching: 0.75, after_meal_walk: 0.65 },
     matchHints: {
       barriers: ['lack_of_time'],
       confidence: ['medium', 'high'],
@@ -108,6 +120,9 @@ export const COHORT_PROFILES = [
     preferredTone: 'motivational',
     preferredContentIds: ['standing_movement', 'indoor_walk', 'ankle_movement'],
     preferredDurationMinutes: 2,
+    burdenSensitivity: 'medium',
+    toneBoosts: { motivational: 1, gentle: 0.7 },
+    contentBoosts: { standing_movement: 1, indoor_walk: 0.8, ankle_movement: 0.7 },
     matchHints: {
       barriers: ['low_motivation', 'fatigue'],
       confidence: ['low', 'medium'],

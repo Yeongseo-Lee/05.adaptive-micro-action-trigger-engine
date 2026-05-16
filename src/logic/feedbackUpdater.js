@@ -29,6 +29,14 @@ export function normalizeResponse(response) {
   return value
 }
 
+function durationBonus(bucketId) {
+  const bucket = normalizeDurationBucket(bucketId)
+  if (bucket === '3–5') return 0.5
+  if (bucket === '5–10') return 1
+  if (bucket === '10+') return 1.5
+  return 0
+}
+
 function bumpCell(target, key, deltaMinutes) {
   if (!key) return
   const cell = target[key] ?? { sum: 0, count: 0 }
@@ -78,9 +86,10 @@ export function applyFeedbackToScores(scores, recommendation, response, duration
   const normalizedResponse = normalizeResponse(response)
 
   if (normalizedResponse === 'yes') {
-    timingScores[slot] = (timingScores[slot] ?? 0) + 0.35
-    toneScores[tone] = (toneScores[tone] ?? 0) + 0.45
-    contentScores[content] = (contentScores[content] ?? 0) + 0.45
+    const extra = durationBonus(durationBucket)
+    timingScores[slot] = (timingScores[slot] ?? 0) + 1
+    toneScores[tone] = (toneScores[tone] ?? 0) + 1 + extra
+    contentScores[content] = (contentScores[content] ?? 0) + 1 + extra
     if (durationBucket) {
       durationStats = recordDurationObservation(
         durationStats,
@@ -91,12 +100,12 @@ export function applyFeedbackToScores(scores, recommendation, response, duration
     }
   } else if (normalizedResponse === 'no') {
     timingScores[slot] = (timingScores[slot] ?? 0) - 0.2
-    toneScores[tone] = (toneScores[tone] ?? 0) - 0.6
-    contentScores[content] = (contentScores[content] ?? 0) - 0.6
+    toneScores[tone] = (toneScores[tone] ?? 0) - 1
+    contentScores[content] = (contentScores[content] ?? 0) - 1
   } else if (normalizedResponse === 'skip') {
     timingScores[slot] = (timingScores[slot] ?? 0) - 0.9
-    toneScores[tone] = (toneScores[tone] ?? 0) - 0.25
-    contentScores[content] = (contentScores[content] ?? 0) - 0.25
+    toneScores[tone] = (toneScores[tone] ?? 0) - 0.2
+    contentScores[content] = (contentScores[content] ?? 0) - 0.2
   }
 
   return { timingScores, toneScores, contentScores, durationStats }

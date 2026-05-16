@@ -56,22 +56,9 @@ function topSlotsByScore(timingScores, limit = 8) {
 
 function buildShortWhy(rec) {
   const b = rec?.scoreBreakdown
-  if (rec?.safetyMode) return 'Safety mode keeps this suggestion lighter.'
-  if (b?.dataLimited) {
-    return 'This recommendation is still mostly based on your profile because feedback history is limited.'
-  }
-  if (b && (b.burdenPenalty ?? 0) > 0.5) {
-    return 'Skipped slots are being deprioritized to reduce notification burden.'
-  }
-  if (b && (b.yesLikelihoodScore ?? 0) >= 0.65) {
-    return 'This slot has the strongest recent Yes pattern.'
-  }
-  if (b && (b.expectedDurationScore ?? 0) >= 0.5) {
-    return 'This slot has shown longer movement duration.'
-  }
-  if (b && (b.cohortPriorScore ?? 0) > 0.4) return 'Aligned with your learned response pattern.'
-  if (b && (b.contextFitScore ?? 0) > 0.6) return 'Adjusted to fit today’s state.'
-  return 'Best combined fit across time, tone, and action.'
+  if (rec?.safetyMode) return 'Matched to today’s lower-burden setting.'
+  if (b?.dataLimited) return 'Based on your profile and recent signals.'
+  return 'Matched to your recent rhythm.'
 }
 
 function feedbackExplanation(response, actualDuration) {
@@ -99,6 +86,96 @@ function pct(value) {
   return `${Math.round((value ?? 0) * 100)}%`
 }
 
+function suggestedDurationLabel(minutes) {
+  if (minutes == null) return '—'
+  if (minutes <= 1.5) return '1–2'
+  if (minutes <= 4) return '3–5'
+  if (minutes <= 7.5) return '5–10'
+  return '10+'
+}
+
+function csvEscape(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
+  return `"${text.replace(/"/g, '""')}"`
+}
+
+function downloadText(filename, text, type) {
+  const blob = new Blob([text], { type })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function buildExportJson(state, analytics) {
+  return JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      feedbackHistory: state.feedbackHistory,
+      algorithmState: {
+        userProfile: state.userProfile,
+        dailyContext: state.dailyContext,
+        matchedCohortId: state.matchedCohortId,
+        cohortMatchScore: state.cohortMatchScore,
+        timingScores: state.timingScores,
+        toneScores: state.toneScores,
+        contentScores: state.contentScores,
+        durationStats: state.durationStats,
+        analytics,
+      },
+    },
+    null,
+    2,
+  )
+}
+
+function buildExportCsv(feedbackHistory) {
+  const header = [
+    'timestamp',
+    'timeSlot',
+    'tone',
+    'action',
+    'suggestedDuration',
+    'response',
+    'actualDuration',
+    'fatigue',
+    'pain',
+    'motivation',
+    'scoreBefore',
+    'scoreAfter',
+  ]
+  const rows = feedbackHistory.map((ev) => [
+    ev.timestamp,
+    ev.timeSlot,
+    ev.tone,
+    ev.action ?? ev.content,
+    ev.suggestedDuration,
+    ev.response,
+    ev.actualDuration,
+    ev.dailyContext?.fatigueToday,
+    ev.dailyContext?.painToday,
+    ev.dailyContext?.motivationToday,
+    ev.scoreBefore,
+    ev.scoreAfter,
+  ])
+  return [header, ...rows].map((row) => row.map(csvEscape).join(',')).join('\n')
+}
+
+function getInitialNotificationPermission() {
+  if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported'
+  return Notification.permission
+}
+
+function notificationStatusLabel(permission, message) {
+  if (message) return message
+  if (permission === 'granted') return 'Status: Ready'
+  if (permission === 'denied') return 'Status: Blocked'
+  if (permission === 'unsupported') return 'Status: Not supported'
+  return 'Status: Not enabled'
+}
+
 function ScoreBar({ label, value, max }) {
   const v = Number(value) || 0
   const mx = Math.max(max, 0.01)
@@ -117,6 +194,8 @@ function ScoreBar({ label, value, max }) {
 export default function App() {
   const [state, setState] = useState(loadAppState)
   const [awaitingDuration, setAwaitingDuration] = useState(false)
+  const [notificationPermission, setNotificationPermission] = useState(getInitialNotificationPermission)
+  const [notificationMessage, setNotificationMessage] = useState('')
 
   useEffect(() => {
     saveAppState(state)
@@ -298,6 +377,54 @@ export default function App() {
     setAwaitingDuration(false)
     setState(resetDemoData())
   }, [])
+
+  const exportJson = useCallback(() => {
+    downloadText(
+      'trigger-engine-export.json',
+      buildExportJson(state, analytics),
+      'application/json',
+    )
+  }, [analytics, state])
+
+  const exportCsv = useCallback(() => {
+    downloadText(
+      'trigger-engine-feedback.csv',
+      buildExportCsv(state.feedbackHistory),
+      'text/csv',
+    )
+  }, [state.feedbackHistory])
+
+  const enableNotifications = useCallback(async () => {
+    setNotificationMessage('')
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setNotificationPermission('unsupported')
+      return
+    }
+    const permission = await Notification.requestPermission()
+    setNotificationPermission(permission)
+  }, [])
+
+  const testNotification = useCallback(() => {
+    if (!state.lastRecommendation?.renderedPrompt) {
+      setNotificationMessage('Generate a prompt first')
+      return
+    }
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setNotificationPermission('unsupported')
+      setNotificationMessage('')
+      return
+    }
+    if (Notification.permission !== 'granted') {
+      setNotificationPermission(Notification.permission)
+      setNotificationMessage('Enable notifications first')
+      return
+    }
+    setNotificationPermission('granted')
+    setNotificationMessage('Status: Ready')
+    new Notification('Trigger Engine', {
+      body: state.lastRecommendation.renderedPrompt,
+    })
+  }, [state.lastRecommendation])
 
   const slotRows = useMemo(
     () => topSlotsByScore(state.timingScores, 8),
@@ -510,48 +637,67 @@ export default function App() {
 
         {state.lastRecommendation && (
           <section className="amate-card amate-card-hero" aria-live="polite">
-            <h2 className="amate-h2 amate-h2-center">Next</h2>
-
-            <div className="amate-hero-kv">
-              <div className="amate-kv">
-                <span className="amate-k">Time</span>
-                <span className="amate-pill amate-pill-strong">{state.lastRecommendation.timeSlotLabel}</span>
-              </div>
-              <div className="amate-kv">
-                <span className="amate-k">Tone</span>
-                <span className="amate-pill">{toneLabel(state.lastRecommendation.tone)}</span>
-              </div>
-              <div className="amate-kv">
-                <span className="amate-k">Action</span>
-                <span className="amate-pill">{state.lastRecommendation.microActionLabel}</span>
-              </div>
-              <div className="amate-kv">
-                <span className="amate-k">Duration</span>
-                <span className="amate-pill">{state.lastRecommendation.suggestedDurationMinutes} min</span>
-              </div>
-            </div>
+            <h2 className="amate-h2 amate-h2-center">Prompt Preview</h2>
+            <p className="amate-status-label">Push-ready simulation</p>
 
             {state.lastRecommendation.safetyMode && (
               <p className="amate-safety-inline">Safety mode</p>
             )}
 
-            <p className="amate-push-copy">Matched to your current rhythm.</p>
+            <p className="amate-notification-message">{state.lastRecommendation.renderedPrompt}</p>
+            <p className="amate-context-muted">This is the message the user would receive.</p>
+
+            <div className="amate-notification-control" aria-label="Notifications">
+              <span className="amate-notification-title">Notifications</span>
+              <button type="button" className="amate-btn-mini" onClick={enableNotifications}>
+                Enable
+              </button>
+              <button type="button" className="amate-btn-mini" onClick={testNotification}>
+                Test
+              </button>
+              <span className="amate-notification-status">
+                {notificationStatusLabel(notificationPermission, notificationMessage)}
+              </span>
+            </div>
+            <p className="amate-context-muted amate-notification-note">
+              Test sends the current prompt as a browser notification.
+            </p>
 
             <div className="amate-why">
               <span className="amate-why-label">Why</span>
               <p className="amate-why-text">{buildShortWhy(state.lastRecommendation)}</p>
             </div>
 
-            {state.lastRecommendation.profileContextSummary && (
-              <p className="amate-context-muted">
-                {state.lastRecommendation.profileContextSummary.preferredTimeRangesText} ·{' '}
-                {state.lastRecommendation.profileContextSummary.mainBarriersText}
-              </p>
-            )}
-
-            <details className="amate-details-min">
-              <summary>Details</summary>
-              <p className="amate-detail-copy">{state.lastRecommendation.renderedPrompt}</p>
+            <details className="amate-details-min amate-engine-details">
+              <summary>Engine Details</summary>
+              <div className="amate-hero-kv amate-hero-kv-engine">
+                <div className="amate-kv">
+                  <span className="amate-k">Slot</span>
+                  <span className="amate-pill amate-pill-light">{state.lastRecommendation.timeSlotLabel}</span>
+                </div>
+                <div className="amate-kv">
+                  <span className="amate-k">Style</span>
+                  <span className="amate-pill amate-pill-light">{toneLabel(state.lastRecommendation.tone)}</span>
+                </div>
+                <div className="amate-kv">
+                  <span className="amate-k">Move</span>
+                  <span className="amate-pill amate-pill-light">{state.lastRecommendation.microActionLabel}</span>
+                </div>
+                <div className="amate-kv">
+                  <span className="amate-k">Target</span>
+                  <span className="amate-pill amate-pill-light">
+                    {suggestedDurationLabel(state.lastRecommendation.suggestedDurationMinutes)}
+                  </span>
+                </div>
+                <div className="amate-kv">
+                  <span className="amate-k">Cohort</span>
+                  <span className="amate-pill amate-pill-light">{analytics.matchedCohortLabel}</span>
+                </div>
+                <div className="amate-kv">
+                  <span className="amate-k">Level</span>
+                  <span className="amate-pill amate-pill-light">{analytics.personalizationLevelLabel}</span>
+                </div>
+              </div>
               {state.lastRecommendation.safetyReasons?.length > 0 && (
                 <ul className="amate-safety-list-tight">
                   {state.lastRecommendation.safetyReasons.map((r, i) => (
@@ -559,15 +705,15 @@ export default function App() {
                   ))}
                 </ul>
               )}
-              <pre className="amate-pre-tight">
-                {JSON.stringify(state.lastRecommendation.scoreBreakdown, null, 2)}
-              </pre>
             </details>
+            <p className="amate-context-muted amate-future-note">
+              Real push delivery can be added with PWA or mobile notifications.
+            </p>
 
             {!awaitingDuration && (
               <div className="amate-feedback-row">
                 <button type="button" className="amate-btn-feedback amate-btn-yes" onClick={onYes}>
-                  Yes
+                  Done
                 </button>
                 <button type="button" className="amate-btn-feedback" onClick={onNo}>
                   No
@@ -603,12 +749,21 @@ export default function App() {
 
         <section className="amate-card" aria-labelledby="dash-heading">
           <h2 id="dash-heading" className="amate-h2">
-            Learning
+            Engine
           </h2>
 
           <p className="amate-profile-line">{profileOneLine}</p>
+          <p className="amate-profile-line amate-profile-note">{analytics.personalizationNote}</p>
 
           <div className="amate-tiles">
+            <div className="amate-tile">
+              <span className="amate-tile-label">Level</span>
+              <span className="amate-tile-value">{analytics.personalizationLevelLabel}</span>
+            </div>
+            <div className="amate-tile">
+              <span className="amate-tile-label">Cohort</span>
+              <span className="amate-tile-value">{analytics.matchedCohortLabel}</span>
+            </div>
             <div className="amate-tile">
               <span className="amate-tile-label">Yes</span>
               <span className="amate-tile-value">{pct(analytics.yesRate)}</span>
@@ -643,15 +798,17 @@ export default function App() {
               </span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Level</span>
-              <span className="amate-tile-value">{analytics.personalizationLevelLabel}</span>
+              <span className="amate-tile-label">Suggested Duration</span>
+              <span className="amate-tile-value">
+                {suggestedDurationLabel(state.lastRecommendation?.suggestedDurationMinutes)}
+              </span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Tone</span>
+              <span className="amate-tile-label">Best Style</span>
               <span className="amate-tile-value">{toneLabel(analytics.bestTone)}</span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Action</span>
+              <span className="amate-tile-label">Best Move</span>
               <span className="amate-tile-value">
                 {getMicroActionById(analytics.bestContent)?.label ?? analytics.bestContent}
               </span>
@@ -662,14 +819,14 @@ export default function App() {
             </div>
           </div>
 
-          <h3 className="amate-h3">Timing</h3>
+          <h3 className="amate-h3">Slot</h3>
           <div className="amate-bars">
             {slotRows.map((row) => (
               <ScoreBar key={row.id} label={row.label} value={row.score} max={maxSlot} />
             ))}
           </div>
 
-          <h3 className="amate-h3">Tone</h3>
+          <h3 className="amate-h3">Style</h3>
           <div className="amate-bars">
             {TONES.map((t) => (
               <ScoreBar
@@ -681,7 +838,7 @@ export default function App() {
             ))}
           </div>
 
-          <h3 className="amate-h3">Action</h3>
+          <h3 className="amate-h3">Move</h3>
           <div className="amate-bars">
             {MICRO_ACTIONS.map((a) => (
               <ScoreBar
@@ -746,6 +903,12 @@ export default function App() {
         </section>
 
         <footer className="amate-footer">
+          <button type="button" className="amate-btn-reset" onClick={exportJson}>
+            Export JSON
+          </button>
+          <button type="button" className="amate-btn-reset" onClick={exportCsv}>
+            Export CSV
+          </button>
           <button type="button" className="amate-btn-reset" onClick={onReset}>
             Reset
           </button>

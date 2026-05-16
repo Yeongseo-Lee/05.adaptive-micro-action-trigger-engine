@@ -39,6 +39,77 @@ export const promptTemplatesByTone = {
   ],
 }
 
+const ACTION_COPY = {
+  indoor_walk: {
+    soft: 'take a light indoor walk',
+    noun: 'indoor walk',
+    reset: 'light indoor walk',
+  },
+  standing_movement: {
+    soft: 'stand up and move lightly',
+    noun: 'standing reset',
+    reset: 'posture reset',
+  },
+  gentle_stretching: {
+    soft: 'try a short stretch',
+    noun: 'short stretch',
+    reset: 'short stretch',
+  },
+  after_meal_walk: {
+    soft: 'take a short walk after eating',
+    noun: 'walk after eating',
+    reset: 'after-meal walk',
+  },
+  ankle_movement: {
+    soft: 'do a small ankle movement reset',
+    noun: 'ankle movement reset',
+    reset: 'small movement reset',
+  },
+}
+
+function durationPhrase(duration) {
+  if (duration === '<1') return 'under a minute'
+  if (duration === '1–2') return '1–2 minutes'
+  if (duration === '3–5') return '3–5 minutes'
+  if (duration === '5–10') return '5–10 minutes'
+  if (duration === '10+') return '10 minutes'
+  if (duration <= 1) return 'under a minute'
+  if (duration <= 1.5) return '1–2 minutes'
+  if (duration <= 4) return '3–5 minutes'
+  if (duration <= 7.5) return '5–10 minutes'
+  return '10 minutes'
+}
+
+/**
+ * User-facing push preview. Uses only fixed, safe copy variants.
+ * @param {string} tone
+ * @param {string} actionId
+ * @param {string | number} duration
+ */
+export function composePromptMessage(tone, actionId, duration) {
+  const action = ACTION_COPY[actionId] ?? ACTION_COPY.standing_movement
+  const d = durationPhrase(duration)
+  if (tone === 'informational') {
+    if (actionId === 'after_meal_walk') {
+      return `A short walk after eating can support your routine. Try ${d}.`
+    }
+    return `A brief ${action.noun} can support your routine. Try ${d}.`
+  }
+  if (tone === 'structured') {
+    if (actionId === 'standing_movement') {
+      return `Stand up, reset your posture, and move lightly for ${d}.`
+    }
+    return `Start simple: ${action.soft} for ${d}. Then return to your day.`
+  }
+  if (tone === 'motivational') {
+    return `Build momentum with a ${action.reset}. Aim for ${d}.`
+  }
+  if (tone === 'risk_framed') {
+    return `Break up long sitting with a ${action.reset}. Start with ${d}.`
+  }
+  return `${action.soft.charAt(0).toUpperCase()}${action.soft.slice(1)} for ${d}. Keep it easy.`
+}
+
 /**
  * @param {string} tone
  * @param {{ time: string, action: string, duration: string }} vars

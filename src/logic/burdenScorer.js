@@ -17,19 +17,29 @@ export function computeBurden(feedbackHistory) {
   }
 
   let burdenPoints = 0
+  let no = 0
+  let skip = 0
   for (const row of recent) {
     const response = normalizeResponse(row.response)
-    if (response === 'no') burdenPoints += 1
-    if (response === 'skip') burdenPoints += 1.4
+    if (response === 'no') {
+      burdenPoints += 1
+      no++
+    }
+    if (response === 'skip') {
+      burdenPoints += 1.4
+      skip++
+    }
   }
   const rate = burdenPoints / recent.length
+  const noRate = no / recent.length
+  const skipRate = skip / recent.length
 
   let level
   let penalty
-  if (rate >= 0.55) {
+  if (skipRate >= 0.45 || rate >= 0.55) {
     level = 'high'
     penalty = 1.8
-  } else if (rate >= 0.3) {
+  } else if (skipRate >= 0.25 || noRate >= 0.35 || rate >= 0.3) {
     level = 'medium'
     penalty = 0.9
   } else {
@@ -41,6 +51,8 @@ export function computeBurden(feedbackHistory) {
     level,
     penalty,
     recentNoSkipRate: Math.round(rate * 100) / 100,
+    recentNoRate: Math.round(noRate * 100) / 100,
+    recentSkipRate: Math.round(skipRate * 100) / 100,
     sampleSize: recent.length,
   }
 }

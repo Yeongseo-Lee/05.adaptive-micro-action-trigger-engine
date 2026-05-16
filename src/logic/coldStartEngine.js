@@ -52,6 +52,9 @@ function barrierMatchStrongest(cohort, userBarriers) {
 function barrierMatchOne(cohort, barrierId) {
   const b = cohort.matchHints?.barriers ?? []
   if (b.includes(barrierId)) return 1
+  if (barrierId === 'pain' && cohort.id === 'pain_cautious') return 1.1
+  if (barrierId === 'fatigue' && cohort.id === 'fatigue_prone') return 1.1
+  if (barrierId === 'low_motivation' && cohort.id === 'low_motivation_restart') return 1.1
   if (barrierId === 'weather' && cohort.id === 'pain_cautious') return 0.4
   return 0.15
 }
@@ -64,7 +67,7 @@ function confidenceMatch(cohort, confidence) {
 
 function painMatch(cohort, painConcern) {
   const wantsPain = cohort.matchHints?.painConcern === true
-  if (wantsPain) return painConcern === 'yes' ? 1 : 0.2
+  if (wantsPain) return painConcern === 'yes' ? 1.1 : 0.2
   return painConcern === 'yes' ? 0.35 : 0.6
 }
 
