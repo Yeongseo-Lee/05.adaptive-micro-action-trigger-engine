@@ -9,6 +9,12 @@ import { optimizePrompt } from './logic/promptOptimizer.js'
 import { applyFeedbackToScores, DURATION_OPTIONS } from './logic/feedbackUpdater.js'
 import { computeAnalytics } from './logic/analytics.js'
 import {
+  getFcmToken,
+  isPushSupported,
+  listenForForegroundMessages,
+  loadFcmTokenFromLocalStorage,
+} from './utils/pushNotifications.js'
+import {
   loadAppState,
   saveAppState,
   resetDemoData,
@@ -168,12 +174,21 @@ function getInitialNotificationPermission() {
   return Notification.permission
 }
 
-function notificationStatusLabel(permission, message) {
+function localNotificationStatusLabel(permission, message) {
   if (message) return message
   if (permission === 'granted') return 'Status: Ready'
   if (permission === 'denied') return 'Status: Blocked'
   if (permission === 'unsupported') return 'Status: Not supported'
   return 'Status: Not enabled'
+}
+
+function pushStatusLabel(status) {
+  if (status === 'ready') return 'Ready'
+  if (status === 'blocked') return 'Blocked'
+  if (status === 'unsupported') return 'Unsupported'
+  if (status === 'not_configured') return 'Not configured'
+  if (status === 'error') return 'Error'
+  return 'Not enabled'
 }
 
 function ScoreBar({ label, value, max }) {
@@ -195,11 +210,43 @@ export default function App() {
   const [state, setState] = useState(loadAppState)
   const [awaitingDuration, setAwaitingDuration] = useState(false)
   const [notificationPermission, setNotificationPermission] = useState(getInitialNotificationPermission)
-  const [notificationMessage, setNotificationMessage] = useState('')
+  const [localNotificationMessage, setLocalNotificationMessage] = useState('')
+  const [pushStatus, setPushStatus] = useState(() =>
+    loadFcmTokenFromLocalStorage() ? 'ready' : 'not_enabled',
+  )
+  const [fcmToken, setFcmToken] = useState(loadFcmTokenFromLocalStorage)
+  const [pushMessage, setPushMessage] = useState('')
 
   useEffect(() => {
     saveAppState(state)
   }, [state])
+
+  useEffect(() => {
+    let unsubscribe = () => {}
+    listenForForegroundMessages((payload) => {
+      const title =
+        payload.notification?.title ||
+        payload.data?.title ||
+        'Trigger Engine'
+      const body =
+        payload.notification?.body ||
+        payload.data?.body ||
+        payload.data?.message ||
+        'Time for a small movement reset.'
+
+      setPushMessage(`${title}: ${body}`)
+
+      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification(title, {
+          body,
+          icon: '/vite.svg',
+        })
+      }
+    }).then((cleanup) => {
+      unsubscribe = cleanup
+    })
+    return () => unsubscribe()
+  }, [])
 
   const analytics = useMemo(() => computeAnalytics(state), [state])
 
@@ -394,33 +441,65 @@ export default function App() {
     )
   }, [state.feedbackHistory])
 
-  const enableNotifications = useCallback(async () => {
-    setNotificationMessage('')
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      setNotificationPermission('unsupported')
-      return
+  const enablePush = useCallback(async () => {
+    setPushMessage('')
+    try {
+      const supported = await isPushSupported()
+      if (!supported) {
+        setPushStatus('unsupported')
+      }
+      const token = await getFcmToken()
+      setFcmToken(token)
+      setPushStatus('ready')
+      setPushMessage('Token ready')
+      setNotificationPermission(getInitialNotificationPermission())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      if (message.includes('not configured') || message.includes('VAPID')) {
+        setPushStatus('not_configured')
+      } else if (message.includes('permission')) {
+        setPushStatus('blocked')
+        setNotificationPermission(getInitialNotificationPermission())
+      } else if (message.includes('not supported')) {
+        setPushStatus('unsupported')
+      } else {
+        setPushStatus('error')
+      }
+      setPushMessage('')
     }
-    const permission = await Notification.requestPermission()
-    setNotificationPermission(permission)
   }, [])
 
-  const testNotification = useCallback(() => {
+  const copyToken = useCallback(async () => {
+    if (!fcmToken) {
+      setPushMessage('No token')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(fcmToken)
+      setPushMessage('Token copied')
+    } catch {
+      setPushMessage('Copy failed')
+    }
+  }, [fcmToken])
+
+  const testLocalNotification = useCallback(() => {
+    setLocalNotificationMessage('')
     if (!state.lastRecommendation?.renderedPrompt) {
-      setNotificationMessage('Generate a prompt first')
+      setLocalNotificationMessage('Generate a prompt first')
       return
     }
     if (typeof window === 'undefined' || !('Notification' in window)) {
       setNotificationPermission('unsupported')
-      setNotificationMessage('')
+      setLocalNotificationMessage('')
       return
     }
     if (Notification.permission !== 'granted') {
       setNotificationPermission(Notification.permission)
-      setNotificationMessage('Enable notifications first')
+      setLocalNotificationMessage('Enable notifications first')
       return
     }
     setNotificationPermission('granted')
-    setNotificationMessage('Status: Ready')
+    setLocalNotificationMessage('Status: Ready')
     new Notification('Trigger Engine', {
       body: state.lastRecommendation.renderedPrompt,
     })
@@ -648,19 +727,25 @@ export default function App() {
             <p className="amate-context-muted">This is the message the user would receive.</p>
 
             <div className="amate-notification-control" aria-label="Notifications">
-              <span className="amate-notification-title">Notifications</span>
-              <button type="button" className="amate-btn-mini" onClick={enableNotifications}>
+              <span className="amate-notification-title">Push</span>
+              <button type="button" className="amate-btn-mini" onClick={enablePush}>
                 Enable
               </button>
-              <button type="button" className="amate-btn-mini" onClick={testNotification}>
-                Test
+              <span className="amate-notification-status">
+                Status: {pushStatusLabel(pushStatus)}
+              </span>
+              <button type="button" className="amate-btn-mini" onClick={copyToken}>
+                Copy Token
+              </button>
+              <button type="button" className="amate-btn-mini" onClick={testLocalNotification}>
+                Test Local
               </button>
               <span className="amate-notification-status">
-                {notificationStatusLabel(notificationPermission, notificationMessage)}
+                {pushMessage || localNotificationStatusLabel(notificationPermission, localNotificationMessage)}
               </span>
             </div>
             <p className="amate-context-muted amate-notification-note">
-              Test sends the current prompt as a browser notification.
+              Remote push requires Firebase Cloud Messaging.
             </p>
 
             <div className="amate-why">
