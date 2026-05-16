@@ -1,16 +1,32 @@
-/** @typedef {'<1'|'1-2'|'3-5'|'5-10'|'10+'} DurationBucketId */
+/** @typedef {'<1'|'1–2'|'3–5'|'5–10'|'10+'} DurationBucketId */
 
 export const DURATION_OPTIONS = [
   { id: '<1', label: '<1 min', midpointMinutes: 0.5 },
-  { id: '1-2', label: '1–2 min', midpointMinutes: 1.5 },
-  { id: '3-5', label: '3–5 min', midpointMinutes: 4 },
-  { id: '5-10', label: '5–10 min', midpointMinutes: 7.5 },
-  { id: '10+', label: '10+ min', midpointMinutes: 12 },
+  { id: '1–2', label: '1–2 min', midpointMinutes: 1.5 },
+  { id: '3–5', label: '3–5 min', midpointMinutes: 4 },
+  { id: '5–10', label: '5–10 min', midpointMinutes: 7.5 },
+  { id: '10+', label: '10+ min', midpointMinutes: 10 },
 ]
 
 export function midpointForBucket(bucketId) {
-  const row = DURATION_OPTIONS.find((o) => o.id === bucketId)
+  const normalized = normalizeDurationBucket(bucketId)
+  const row = DURATION_OPTIONS.find((o) => o.id === normalized)
   return row?.midpointMinutes ?? 0
+}
+
+export function normalizeDurationBucket(bucketId) {
+  if (bucketId === '1-2') return '1–2'
+  if (bucketId === '3-5') return '3–5'
+  if (bucketId === '5-10') return '5–10'
+  return bucketId ?? null
+}
+
+export function normalizeResponse(response) {
+  const value = String(response ?? '').toLowerCase()
+  if (value === 'done' || value === 'yes') return 'yes'
+  if (value === 'no') return 'no'
+  if (value === 'skip') return 'skip'
+  return value
 }
 
 function bumpCell(target, key, deltaMinutes) {
@@ -28,7 +44,8 @@ function bumpCell(target, key, deltaMinutes) {
  * @param {string} bucketId
  */
 export function recordDurationObservation(durationStats, slotId, contentId, bucketId) {
-  const minutes = midpointForBucket(bucketId)
+  const actualDuration = normalizeDurationBucket(bucketId)
+  const minutes = midpointForBucket(actualDuration)
   if (!minutes) return durationStats
   const bySlot = { ...(durationStats.bySlot || {}) }
   const byContent = { ...(durationStats.byContent || {}) }
@@ -38,11 +55,11 @@ export function recordDurationObservation(durationStats, slotId, contentId, buck
 }
 
 /**
- * Apply Yes / No / Skip adjustments to learner scores.
+ * Apply yes / no / skip adjustments to learner scores.
  * @param {object} scores — { timingScores, toneScores, contentScores, durationStats }
  * @param {object} recommendation — output shape from promptOptimizer
- * @param {'Yes'|'No'|'Skip'} response
- * @param {string | null} durationBucket — when response is Yes and user answered follow-up
+ * @param {'yes'|'no'|'skip'|'Yes'|'No'|'Skip'} response
+ * @param {string | null} durationBucket — when response is yes and user answered follow-up
  */
 export function applyFeedbackToScores(scores, recommendation, response, durationBucket) {
   const timingScores = { ...scores.timingScores }
@@ -58,8 +75,9 @@ export function applyFeedbackToScores(scores, recommendation, response, duration
   const slot = recommendation.timeSlotId
   const tone = recommendation.tone
   const content = recommendation.microActionId
+  const normalizedResponse = normalizeResponse(response)
 
-  if (response === 'Yes') {
+  if (normalizedResponse === 'yes') {
     timingScores[slot] = (timingScores[slot] ?? 0) + 0.35
     toneScores[tone] = (toneScores[tone] ?? 0) + 0.45
     contentScores[content] = (contentScores[content] ?? 0) + 0.45
@@ -71,11 +89,11 @@ export function applyFeedbackToScores(scores, recommendation, response, duration
         durationBucket,
       )
     }
-  } else if (response === 'No') {
+  } else if (normalizedResponse === 'no') {
     timingScores[slot] = (timingScores[slot] ?? 0) - 0.2
     toneScores[tone] = (toneScores[tone] ?? 0) - 0.6
     contentScores[content] = (contentScores[content] ?? 0) - 0.6
-  } else if (response === 'Skip') {
+  } else if (normalizedResponse === 'skip') {
     timingScores[slot] = (timingScores[slot] ?? 0) - 0.9
     toneScores[tone] = (toneScores[tone] ?? 0) - 0.25
     contentScores[content] = (contentScores[content] ?? 0) - 0.25

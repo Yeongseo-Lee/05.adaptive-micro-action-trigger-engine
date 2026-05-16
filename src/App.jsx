@@ -22,9 +22,9 @@ const DISCLAIMER = 'Not medical advice.'
 
 const DURATION_CHIP_LABEL = {
   '<1': '<1',
-  '1-2': '1–2',
-  '3-5': '3–5',
-  '5-10': '5–10',
+  '1–2': '1–2',
+  '3–5': '3–5',
+  '5–10': '5–10',
   '10+': '10+',
 }
 
@@ -57,9 +57,32 @@ function topSlotsByScore(timingScores, limit = 8) {
 function buildShortWhy(rec) {
   const b = rec?.scoreBreakdown
   if (rec?.safetyMode) return 'Safety mode keeps this suggestion lighter.'
+  if (b && (b.durationTerm ?? 0) > 0.45) {
+    return 'This slot has shown stronger movement duration in recent feedback.'
+  }
+  if (b && (b.yesLikelihoodTerm ?? 0) > 0.25) {
+    return 'Recent feedback suggests this prompt is more likely to get a yes.'
+  }
   if (b && (b.cohortTerm ?? 0) > 0.4) return 'Aligned with your learned response pattern.'
   if (b && (b.contextTerm ?? 0) > 0.15) return 'Adjusted to fit today’s state.'
   return 'Best combined fit across time, tone, and action.'
+}
+
+function feedbackExplanation(response, actualDuration) {
+  if (response === 'yes') {
+    return actualDuration
+      ? `Yes with ${actualDuration} updated timing, tone, action, and duration learning.`
+      : 'Yes updated timing, tone, and action learning.'
+  }
+  if (response === 'no') return 'No lightly lowered this time and moderately lowered this tone and action.'
+  return 'Skip strongly lowered this time and added to notification burden.'
+}
+
+function responseLabel(response) {
+  if (response === 'yes') return 'Yes'
+  if (response === 'no') return 'No'
+  if (response === 'skip') return 'Skip'
+  return response
 }
 
 function ScoreBar({ label, value, max }) {
@@ -156,6 +179,7 @@ export default function App() {
         timingScores: s.timingScores,
         toneScores: s.toneScores,
         contentScores: s.contentScores,
+        durationStats: s.durationStats,
         feedbackHistory: s.feedbackHistory,
       })
       const preferredTimeRangesText = formatIdListForDisplay(
@@ -178,7 +202,7 @@ export default function App() {
     setAwaitingDuration(false)
   }, [])
 
-  const pushFeedback = useCallback((response, durationBucket) => {
+  const pushFeedback = useCallback((response, actualDuration) => {
     setState((s) => {
       if (!s.lastRecommendation) return s
       const rec = s.lastRecommendation
@@ -197,26 +221,26 @@ export default function App() {
         },
         rec,
         response,
-        durationBucket ?? null,
+        actualDuration ?? null,
       )
 
       const event = {
         timestamp: new Date().toISOString(),
+        timeSlot: rec.timeSlotId,
+        tone: rec.tone,
+        content: rec.microActionId,
+        action: rec.microActionId,
+        suggestedDuration: rec.suggestedDurationMinutes,
         response,
-        durationBucket: durationBucket ?? null,
+        actualDuration: actualDuration ?? null,
         dailyContext: { ...s.dailyContext },
-        recommendation: {
-          timeSlotId: rec.timeSlotId,
-          tone: rec.tone,
-          microActionId: rec.microActionId,
-          suggestedDurationMinutes: rec.suggestedDurationMinutes,
-        },
         scoreBefore,
         scoreAfter: {
           timing: { ...next.timingScores },
           tone: { ...next.toneScores },
           content: { ...next.contentScores },
         },
+        explanation: feedbackExplanation(response, actualDuration),
       }
 
       return {
@@ -236,19 +260,19 @@ export default function App() {
 
   const onDurationPick = useCallback(
     (bucketId) => {
-      pushFeedback('Yes', bucketId)
+      pushFeedback('yes', bucketId)
       setAwaitingDuration(false)
     },
     [pushFeedback],
   )
 
   const onNo = useCallback(() => {
-    pushFeedback('No', null)
+    pushFeedback('no', null)
     setAwaitingDuration(false)
   }, [pushFeedback])
 
   const onSkip = useCallback(() => {
-    pushFeedback('Skip', null)
+    pushFeedback('skip', null)
     setAwaitingDuration(false)
   }, [pushFeedback])
 
@@ -572,36 +596,40 @@ export default function App() {
 
           <div className="amate-tiles">
             <div className="amate-tile">
-              <span className="amate-tile-label">Cohort</span>
-              <span className="amate-tile-value">{analytics.matchedCohortLabel}</span>
+              <span className="amate-tile-label">Yes</span>
+              <span className="amate-tile-value">{Math.round(analytics.yesRate * 100)}%</span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Level</span>
-              <span className="amate-tile-value">{analytics.personalizationLevel}%</span>
+              <span className="amate-tile-label">No</span>
+              <span className="amate-tile-value">{Math.round(analytics.noRate * 100)}%</span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Best time</span>
-              <span className="amate-tile-value">{analytics.bestTimeSlot}</span>
+              <span className="amate-tile-label">Skip</span>
+              <span className="amate-tile-value">{Math.round(analytics.skipRate * 100)}%</span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Best tone</span>
-              <span className="amate-tile-value">{toneLabel(analytics.bestTone)}</span>
-            </div>
-            <div className="amate-tile">
-              <span className="amate-tile-label">Best action</span>
-              <span className="amate-tile-value">
-                {getMicroActionById(analytics.bestContent)?.label ?? analytics.bestContent}
-              </span>
-            </div>
-            <div className="amate-tile">
-              <span className="amate-tile-label">Avg min</span>
+              <span className="amate-tile-label">Avg Min</span>
               <span className="amate-tile-value">
                 {analytics.averageMovementDuration != null ? analytics.averageMovementDuration : '—'}
               </span>
             </div>
             <div className="amate-tile">
-              <span className="amate-tile-label">Yes rate</span>
-              <span className="amate-tile-value">{Math.round(analytics.yesRate * 100)}%</span>
+              <span className="amate-tile-label">Best Start</span>
+              <span className="amate-tile-value">{analytics.bestTimeSlotByYesRate}</span>
+            </div>
+            <div className="amate-tile">
+              <span className="amate-tile-label">Best Duration</span>
+              <span className="amate-tile-value">{analytics.bestTimeSlotByAverageDuration}</span>
+            </div>
+            <div className="amate-tile">
+              <span className="amate-tile-label">Tone</span>
+              <span className="amate-tile-value">{toneLabel(analytics.bestTone)}</span>
+            </div>
+            <div className="amate-tile">
+              <span className="amate-tile-label">Action</span>
+              <span className="amate-tile-value">
+                {getMicroActionById(analytics.bestContent)?.label ?? analytics.bestContent}
+              </span>
             </div>
             <div className="amate-tile">
               <span className="amate-tile-label">Burden</span>
@@ -681,9 +709,9 @@ export default function App() {
                     })}
                   </span>
                   <span className="amate-history-meta">
-                    {ev.response}
-                    {ev.durationBucket ? ` · ${DURATION_CHIP_LABEL[ev.durationBucket] ?? ev.durationBucket}` : ''}{' '}
-                    · {ev.recommendation.timeSlotId}
+                    {responseLabel(ev.response)}
+                    {ev.actualDuration ? ` · ${DURATION_CHIP_LABEL[ev.actualDuration] ?? ev.actualDuration}` : ''}{' '}
+                    · {ev.timeSlot ?? ev.recommendation?.timeSlotId}
                   </span>
                 </li>
               ))}

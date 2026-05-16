@@ -68,6 +68,47 @@ function userPreferredSlotBonuses(profile, slotId) {
   return Math.min(bonus, 1.1)
 }
 
+function normalizeResponse(response) {
+  const value = String(response ?? '').toLowerCase()
+  if (value === 'done') return 'yes'
+  return value
+}
+
+function responseStats(feedbackHistory) {
+  const bySlot = {}
+  const byTone = {}
+  const byContent = {}
+  for (const row of feedbackHistory ?? []) {
+    const response = normalizeResponse(row.response)
+    const slot = row.timeSlot ?? row.recommendation?.timeSlotId
+    const tone = row.tone ?? row.recommendation?.tone
+    const content = row.content ?? row.action ?? row.recommendation?.microActionId
+    for (const [map, key] of [
+      [bySlot, slot],
+      [byTone, tone],
+      [byContent, content],
+    ]) {
+      if (!key) continue
+      map[key] = map[key] ?? { yes: 0, total: 0 }
+      if (response === 'yes') map[key].yes += 1
+      if (response === 'yes' || response === 'no' || response === 'skip') map[key].total += 1
+    }
+  }
+  return { bySlot, byTone, byContent }
+}
+
+function yesRateTerm(stats, key) {
+  const row = stats[key]
+  if (!row?.total) return 0
+  const confidence = Math.min(1, row.total / 5)
+  return ((row.yes / row.total) - 0.5) * confidence * 1.2
+}
+
+function averageDurationCell(cell) {
+  if (!cell?.count) return 0
+  return cell.sum / cell.count
+}
+
 /**
  * @param {object} params
  * @returns {object | null}
@@ -79,9 +120,11 @@ export function optimizePrompt({
   timingScores,
   toneScores,
   contentScores,
+  durationStats,
   feedbackHistory,
 }) {
   const burden = computeBurden(feedbackHistory)
+  const behavior = responseStats(feedbackHistory)
   let best = null
   let bestTotal = -Infinity
 
@@ -99,6 +142,16 @@ export function optimizePrompt({
           const cohortP = cohortPriorScore(matchedCohort, slot.id, tone, action.id, durationMinutes)
           const ctxFit = dailyContextFit(dailyContext, action, tone, slot)
           const prefBias = userPreferredSlotBonuses(userProfile, slot.id)
+          const yesLikelihoodTerm =
+            yesRateTerm(behavior.bySlot, slot.id) +
+            yesRateTerm(behavior.byTone, tone) * 0.5 +
+            yesRateTerm(behavior.byContent, action.id) * 0.5
+          const slotAvg = averageDurationCell(durationStats?.bySlot?.[slot.id])
+          const contentAvg = averageDurationCell(durationStats?.byContent?.[action.id])
+          const expectedDuration = slotAvg && contentAvg
+            ? (slotAvg + contentAvg) / 2
+            : slotAvg || contentAvg
+          const durationTerm = expectedDuration ? Math.min(1.2, (expectedDuration / 10) * 1.2) : 0
 
           const timingTerm = 1.0 * tScore
           const toneTerm = 1.0 * tnScore
@@ -118,7 +171,9 @@ export function optimizePrompt({
             cohortTerm +
             contextTerm -
             safetyPen -
-            burdenPenalty
+            burdenPenalty +
+            yesLikelihoodTerm +
+            durationTerm
 
           if (total > bestTotal) {
             bestTotal = total
@@ -147,6 +202,9 @@ export function optimizePrompt({
                 contextTerm,
                 safetyPenalty: safetyPen,
                 burdenPenalty,
+                yesLikelihoodTerm,
+                durationTerm,
+                expectedDuration: expectedDuration ? Math.round(expectedDuration * 10) / 10 : null,
                 total,
               },
             }
@@ -186,6 +244,9 @@ export function optimizePrompt({
         contextTerm: 0,
         safetyPenalty: 0,
         burdenPenalty: 0,
+        yesLikelihoodTerm: 0,
+        durationTerm: 0,
+        expectedDuration: null,
         total: 0,
       },
     }

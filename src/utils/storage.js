@@ -1,6 +1,7 @@
 import { TIME_SLOT_IDS } from '../data/timeSlots.js'
 import { TONES } from '../data/promptTemplates.js'
 import { MICRO_ACTION_IDS } from '../data/microActions.js'
+import { normalizeDurationBucket, normalizeResponse } from '../logic/feedbackUpdater.js'
 
 export const STORAGE_KEY = 'adaptivePromptEngineV2'
 
@@ -133,6 +134,27 @@ export function createInitialAppState() {
   }
 }
 
+function normalizeFeedbackEvent(row) {
+  if (!row || typeof row !== 'object') return null
+  const recommendation = row.recommendation ?? {}
+  const actualDuration = normalizeDurationBucket(row.actualDuration ?? row.durationBucket ?? null)
+  return {
+    timestamp: row.timestamp ?? new Date().toISOString(),
+    timeSlot: row.timeSlot ?? recommendation.timeSlotId ?? null,
+    tone: row.tone ?? recommendation.tone ?? null,
+    content: row.content ?? row.action ?? recommendation.microActionId ?? null,
+    action: row.action ?? row.content ?? recommendation.microActionId ?? null,
+    suggestedDuration:
+      row.suggestedDuration ?? recommendation.suggestedDurationMinutes ?? null,
+    response: normalizeResponse(row.response),
+    actualDuration,
+    dailyContext: row.dailyContext ?? {},
+    scoreBefore: row.scoreBefore ?? { timing: {}, tone: {}, content: {} },
+    scoreAfter: row.scoreAfter ?? { timing: {}, tone: {}, content: {} },
+    explanation: row.explanation ?? '',
+  }
+}
+
 /**
  * @param {Partial<AppStateV2>} loaded
  * @returns {AppStateV2}
@@ -172,7 +194,9 @@ export function normalizeAppState(loaded) {
       bySlot: { ...(loaded.durationStats?.bySlot || {}) },
       byContent: { ...(loaded.durationStats?.byContent || {}) },
     },
-    feedbackHistory: Array.isArray(loaded.feedbackHistory) ? loaded.feedbackHistory : [],
+    feedbackHistory: Array.isArray(loaded.feedbackHistory)
+      ? loaded.feedbackHistory.map(normalizeFeedbackEvent).filter(Boolean)
+      : [],
     lastRecommendation: loaded.lastRecommendation ?? null,
   }
 }

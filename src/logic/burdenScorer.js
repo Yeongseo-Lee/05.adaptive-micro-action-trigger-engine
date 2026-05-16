@@ -1,5 +1,11 @@
 const WINDOW = 15
 
+function normalizeResponse(response) {
+  const value = String(response ?? '').toLowerCase()
+  if (value === 'done') return 'yes'
+  return value
+}
+
 /**
  * Burden from recent push responses (No / Skip).
  * @param {Array<{ response: string }>} feedbackHistory newest first
@@ -10,14 +16,16 @@ export function computeBurden(feedbackHistory) {
     return { level: 'low', penalty: 0, recentNoSkipRate: 0, sampleSize: 0 }
   }
 
-  let noSkip = 0
+  let burdenPoints = 0
   for (const row of recent) {
-    if (row.response === 'No' || row.response === 'Skip') noSkip++
+    const response = normalizeResponse(row.response)
+    if (response === 'no') burdenPoints += 1
+    if (response === 'skip') burdenPoints += 1.4
   }
-  const rate = noSkip / recent.length
+  const rate = burdenPoints / recent.length
 
-  let level = 'low'
-  let penalty = 0
+  let level
+  let penalty
   if (rate >= 0.55) {
     level = 'high'
     penalty = 1.8

@@ -3,7 +3,7 @@ import { TONES } from '../data/promptTemplates.js'
 import { MICRO_ACTION_IDS } from '../data/microActions.js'
 import { getCohortById } from '../data/cohortProfiles.js'
 import { computeBurden } from './burdenScorer.js'
-import { midpointForBucket } from './feedbackUpdater.js'
+import { midpointForBucket, normalizeResponse } from './feedbackUpdater.js'
 
 function bestKey(scores, keys) {
   let best = keys[0]
@@ -33,6 +33,33 @@ function averageFromCells(cells) {
   return Math.round((sum / n) * 10) / 10
 }
 
+function bestRate(stats, fallbackKey) {
+  let best = fallbackKey
+  let bestV = -1
+  for (const [key, row] of Object.entries(stats)) {
+    const shown = row.yes + row.no + row.skip
+    if (shown === 0) continue
+    const rate = row.yes / shown
+    if (rate > bestV) {
+      bestV = rate
+      best = key
+    }
+  }
+  return { key: best, value: Math.max(0, bestV) }
+}
+
+function bestAverage(averages, fallbackKey) {
+  let best = fallbackKey
+  let bestV = -1
+  for (const [key, value] of Object.entries(averages)) {
+    if (value > bestV) {
+      bestV = value
+      best = key
+    }
+  }
+  return { key: best, value: Math.max(0, bestV) }
+}
+
 function personalizationFromState(state) {
   const n = state.feedbackHistory?.length ?? 0
   const spread =
@@ -53,21 +80,30 @@ export function computeAnalytics(state) {
   let no = 0
   let skip = 0
   const durationSamples = []
+  const responseBySlot = {}
 
   for (const row of hist) {
-    if (row.response === 'Yes') {
+    const response = normalizeResponse(row.response)
+    const slot = row.timeSlot ?? row.recommendation?.timeSlotId
+    if (slot) {
+      responseBySlot[slot] = responseBySlot[slot] ?? { yes: 0, no: 0, skip: 0 }
+      if (responseBySlot[slot][response] !== undefined) responseBySlot[slot][response] += 1
+    }
+
+    if (response === 'yes') {
       yes++
-      if (row.durationBucket) {
-        durationSamples.push(midpointForBucket(row.durationBucket))
+      const actualDuration = row.actualDuration ?? row.durationBucket
+      if (actualDuration) {
+        durationSamples.push(midpointForBucket(actualDuration))
       }
-    } else if (row.response === 'No') no++
-    else if (row.response === 'Skip') skip++
+    } else if (response === 'no') no++
+    else if (response === 'skip') skip++
   }
 
-  const total = yes + no + skip || 1
-  const yesRate = Math.round((yes / total) * 1000) / 1000
-  const noRate = Math.round((no / total) * 1000) / 1000
-  const skipRate = Math.round((skip / total) * 1000) / 1000
+  const total = yes + no + skip
+  const yesRate = total ? Math.round((yes / total) * 1000) / 1000 : 0
+  const noRate = total ? Math.round((no / total) * 1000) / 1000 : 0
+  const skipRate = total ? Math.round((skip / total) * 1000) / 1000 : 0
 
   const avgDuration =
     durationSamples.length > 0
@@ -88,6 +124,19 @@ export function computeAnalytics(state) {
   for (const [slotId, cell] of Object.entries(ds)) {
     if (cell.count > 0) bySlotAverages[slotId] = Math.round((cell.sum / cell.count) * 10) / 10
   }
+  const byContentAverages = {}
+  const dc = state.durationStats?.byContent ?? {}
+  for (const [contentId, cell] of Object.entries(dc)) {
+    if (cell.count > 0) byContentAverages[contentId] = Math.round((cell.sum / cell.count) * 10) / 10
+  }
+
+  const yesRateByTimeSlot = {}
+  for (const [slotId, row] of Object.entries(responseBySlot)) {
+    const shown = row.yes + row.no + row.skip
+    yesRateByTimeSlot[slotId] = shown ? Math.round((row.yes / shown) * 1000) / 1000 : 0
+  }
+  const bestSlotByYes = bestRate(responseBySlot, bestSlot.key)
+  const bestSlotByDuration = bestAverage(bySlotAverages, bestSlot.key)
 
   return {
     yesRate,
@@ -95,7 +144,13 @@ export function computeAnalytics(state) {
     skipRate,
     averageMovementDuration: avgDuration,
     averageDurationBySlot: bySlotAverages,
+    averageDurationByContent: byContentAverages,
     globalAverageFromStats: averageFromCells(state.durationStats?.bySlot),
+    yesRateByTimeSlot,
+    bestTimeSlotByYesRate: bestSlotByYes.key,
+    bestTimeSlotByYesRateValue: Math.round(bestSlotByYes.value * 1000) / 1000,
+    bestTimeSlotByAverageDuration: bestSlotByDuration.key,
+    bestTimeSlotByAverageDurationValue: Math.round(bestSlotByDuration.value * 10) / 10,
     bestTimeSlot: bestSlot.key,
     bestTimeSlotScore: Math.round(bestSlot.value * 100) / 100,
     bestTone: bestTone.key,
